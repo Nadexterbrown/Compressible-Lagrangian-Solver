@@ -39,3 +39,11 @@ Each citation should include:
 **Used in**: Reference for 1D Lagrangian conservation equation formulation
 
 **Description**: Secondary reference specifically for the 1D Lagrangian formulation of conservation laws. Provides theoretical foundation and numerical methods for Lagrangian hydrodynamics.
+
+### [Cantera] - Thermodynamic Properties and EOS
+
+**Reference**: Goodwin, D.G., Speth, R.L., Moffat, H.K., and Weber, B.W. (2023). *Cantera: An Object-oriented Software Toolkit for Chemical Kinetics, Thermodynamics, and Transport Processes*. Version 3.0.0. https://www.cantera.org. DOI: 10.5281/zenodo.8137090
+
+**Used in**: All equation of state and thermodynamic property calculations
+
+**Description**: Open-source chemical kinetics software used for all EOS calculations, species thermodynamic properties, and gas mixture handling throughout the solver.

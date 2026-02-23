@@ -30,10 +30,24 @@ All boundary conditions must be generic and support:
 - Primary reference: Toro, E.F. "Riemann Solvers and Numerical Methods for Fluid Dynamics" (3rd ed., Springer, 2009)
 - Secondary reference (1D Lagrangian formulation): Després, B. "Numerical Methods for Eulerian and Lagrangian Conservation Laws" (Birkhäuser, 2017)
 
+### Equation of State
+All EOS calculations handled via Cantera. Application scripts must use:
+```python
+INPUT_PARAMS_CONFIG = {
+    'T': 503,                    # Temperature [K]
+    'P': 10e5,                   # Pressure [Pa]
+    'Phi': 1.0,                  # Equivalence ratio
+    'Fuel': 'H2',                # Fuel species
+    'Oxidizer': 'O2:1, N2:3.76', # Oxidizer (air)
+    'mech': '../../chemical_mechanism/LiDryer.yaml',  # Cantera mechanism file
+}
+```
+
 ### Core Requirements
 - Lagrangian formulation: mesh moves with fluid
 - Compressible flow capability
 - Support for evolving flow behaviors
+- Cantera for thermodynamic property calculations
 
 ## Development Guidelines
 
@@ -52,6 +66,9 @@ All boundary conditions must be generic and support:
 
 ### Language
 - Python
+
+### Dependencies
+- Cantera (thermodynamic properties and EOS calculations)
 
 ## Expected Domain Knowledge
 
