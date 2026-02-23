@@ -4,11 +4,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-1D Compressible Lagrangian Solver - A computational fluid dynamics project for simulating compressible flows using Lagrangian methods in one dimension.
+1D Compressible Lagrangian Solver - A robust and accurate Lagrangian fluid dynamics solver for evaluating compressible flows of various and evolving behaviors in one dimension.
 
-## Repository Status
+## Technical Specifications
 
-This repository is in early development. The project structure, programming language, and build system have not yet been established.
+### Boundary Conditions
+All boundary conditions must be generic and support:
+
+**Solid Boundaries:**
+- Adiabatic (no heat flux)
+- Isothermal (fixed temperature)
+
+**Moving Solid Boundaries:**
+- Adiabatic
+- Isothermal
+- Porous
+
+**Open Boundaries:**
+- First order extrapolation from interior (respects compressibility communication direction)
+
+### Time Integration
+- Second order accurate: Heun's method (explicit predictor-corrector)
+
+### Core Requirements
+- Lagrangian formulation: mesh moves with fluid
+- Compressible flow capability
+- Support for evolving flow behaviors
 
 ## Development Guidelines
 
