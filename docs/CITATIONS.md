@@ -47,3 +47,79 @@ Each citation should include:
 **Used in**: All equation of state and thermodynamic property calculations
 
 **Description**: Open-source chemical kinetics software used for all EOS calculations, species thermodynamic properties, and gas mixture handling throughout the solver.
+
+---
+
+## Implementation-Specific Citations
+
+### Ideal Gas EOS
+
+**Reference**: [Toro2009] Section 1.2, Equations (1.20)-(1.25)
+
+**Used in**: `src/lagrangian_solver/equations/eos.py:108-165`
+
+**Description**: Ideal gas equation of state implementation with relations p = (γ-1)ρe, c = √(γp/ρ)
+
+### Exact Riemann Solver
+
+**Reference**: [Toro2009] Chapter 4, Section 4.3, Algorithm 4.1
+
+**Used in**: `src/lagrangian_solver/numerics/riemann.py:100-250`
+
+**Description**: Newton-Raphson iterative exact Riemann solver with pressure function formulation. Initial guess methods from Section 4.3.1.
+
+### HLLC Approximate Solver
+
+**Reference**: [Toro2009] Chapter 10, Section 10.4
+
+**Used in**: `src/lagrangian_solver/numerics/riemann.py:320-420`
+
+**Description**: Harten-Lax-van Leer-Contact approximate Riemann solver with wave speed estimates from Section 10.5.1.
+
+### Toro Riemann Test Problems
+
+**Reference**: [Toro2009] Section 4.3.3, Table 4.1
+
+**Used in**: `tests/verification/test_toro_riemann.py`
+
+**Description**: Five canonical Riemann problems for solver validation: Sod shock tube, two rarefactions, left blast, right blast, and two-shock collision.
+
+### Lagrangian Conservation Equations
+
+**Reference**: [Despres2017] Chapter 3, Equations (3.7)-(3.9), (3.15)-(3.17)
+
+**Used in**: `src/lagrangian_solver/equations/conservation.py`, `src/lagrangian_solver/core/state.py`
+
+**Description**: Lagrangian form of 1D compressible Euler equations in mass coordinates: ∂τ/∂t - ∂u/∂m = 0, ∂u/∂t + ∂p/∂m = 0, ∂E/∂t + ∂(pu)/∂m = 0
+
+### Heun's Method (Time Integration)
+
+**Reference**: [Toro2009] Section 6.4.2
+
+**Used in**: `src/lagrangian_solver/numerics/time_integration.py:85-140`
+
+**Description**: Second-order explicit predictor-corrector time integration (improved Euler/RK2)
+
+### CFL Condition
+
+**Reference**: [Toro2009] Section 6.3
+
+**Used in**: `src/lagrangian_solver/numerics/time_integration.py:60-80`, `src/lagrangian_solver/core/grid.py:175-195`
+
+**Description**: Courant-Friedrichs-Lewy stability condition dt ≤ CFL × min(dx/(|u|+c))
+
+### Characteristic Boundary Conditions
+
+**Reference**: Poinsot, T.J., & Lele, S.K. (1992). Boundary conditions for direct simulations of compressible viscous flows. *Journal of Computational Physics*, 101(1), 104-129.
+
+**Used in**: `src/lagrangian_solver/boundary/open.py`
+
+**Description**: Non-reflecting characteristic boundary conditions for open boundaries based on NSCBC methodology
+
+### Beavers-Joseph Porous Interface Condition
+
+**Reference**: Beavers, G.S., & Joseph, D.D. (1967). Boundary conditions at a naturally permeable wall. *Journal of Fluid Mechanics*, 30(1), 197-207.
+
+**Used in**: `src/lagrangian_solver/boundary/piston.py:90-130`
+
+**Description**: Slip velocity condition for flow at porous boundaries: u_slip = (√K/α_BJ) × du/dn

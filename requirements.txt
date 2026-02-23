@@ -1,0 +1,8 @@
+# Core dependencies
+numpy>=1.21.0
+cantera>=3.0.0
+h5py>=3.0.0
+
+# Development dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
