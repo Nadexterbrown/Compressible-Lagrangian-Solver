@@ -26,6 +26,9 @@ All boundary conditions must be generic and support:
 ### Time Integration
 - Second order accurate: Heun's method (explicit predictor-corrector)
 
+### Numerical Schemes
+- Baseline reference: Toro, E.F. "Riemann Solvers and Numerical Methods for Fluid Dynamics" (3rd ed., Springer, 2009)
+
 ### Core Requirements
 - Lagrangian formulation: mesh moves with fluid
 - Compressible flow capability

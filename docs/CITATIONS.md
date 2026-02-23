@@ -24,4 +24,10 @@ Each citation should include:
 
 ## References
 
-(Add citations below as the codebase develops)
+### [Toro2009] - Primary Reference for Numerical Schemes
+
+**Reference**: Toro, E.F. (2009). *Riemann Solvers and Numerical Methods for Fluid Dynamics: A Practical Introduction* (3rd ed.). Springer-Verlag Berlin Heidelberg. ISBN: 978-3-540-25202-3. DOI: 10.1007/b79761
+
+**Used in**: Baseline reference for all numerical schemes
+
+**Description**: Primary reference for Riemann solvers, Godunov methods, flux calculations, and numerical methods for compressible flow simulations. This text serves as the foundational reference for the solver's numerical implementation.
