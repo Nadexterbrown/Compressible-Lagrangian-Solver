@@ -17,6 +17,7 @@ This repository is in early development. The project structure, programming lang
 - All research must be thorough with proper citations
 - Every algorithm or method implementation must reference verified sources (academic papers, textbooks, or established codebases)
 - Git commits are acceptable as citations for implementation decisions
+- All citations must be recorded in `docs/CITATIONS.md` with file paths and line numbers
 
 ### Version Control
 - Push to git after every change to the Python package
