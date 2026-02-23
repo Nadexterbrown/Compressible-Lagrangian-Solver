@@ -31,3 +31,11 @@ Each citation should include:
 **Used in**: Baseline reference for all numerical schemes
 
 **Description**: Primary reference for Riemann solvers, Godunov methods, flux calculations, and numerical methods for compressible flow simulations. This text serves as the foundational reference for the solver's numerical implementation.
+
+### [Despres2017] - Secondary Reference for Lagrangian Formulation
+
+**Reference**: Després, B. (2017). *Numerical Methods for Eulerian and Lagrangian Conservation Laws*. Birkhäuser, Cham. ISBN: 978-3-319-50354-4. DOI: 10.1007/978-3-319-50355-1
+
+**Used in**: Reference for 1D Lagrangian conservation equation formulation
+
+**Description**: Secondary reference specifically for the 1D Lagrangian formulation of conservation laws. Provides theoretical foundation and numerical methods for Lagrangian hydrodynamics.
