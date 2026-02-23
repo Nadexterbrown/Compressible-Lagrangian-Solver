@@ -22,6 +22,7 @@ This repository is in early development. The project structure, programming lang
 - Push to git after every change to the Python package
 - Maintain a thorough history of all changes
 - Commit messages should document what was changed and why
+- Do not include "Co-Authored-By" lines in commits
 
 ### Language
 - Python
