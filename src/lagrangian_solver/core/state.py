@@ -95,6 +95,7 @@ class FlowState:
         E: Total specific energy [J/kg]
         c: Sound speed [m/s]
         gamma: Ratio of specific heats [-]
+        s: Specific entropy [J/(kg·K)]
 
         # Face-centered quantities
         x: Position [m]
@@ -114,6 +115,7 @@ class FlowState:
     E: np.ndarray
     c: np.ndarray
     gamma: np.ndarray
+    s: np.ndarray  # Specific entropy
 
     # Face-centered kinematic state
     x: np.ndarray
@@ -136,6 +138,7 @@ class FlowState:
             ("E", self.E),
             ("c", self.c),
             ("gamma", self.gamma),
+            ("s", self.s),
             ("dm", self.dm),
         ]:
             if len(arr) != n_cells:
@@ -190,6 +193,7 @@ class FlowState:
             E=self.E.copy(),
             c=self.c.copy(),
             gamma=self.gamma.copy(),
+            s=self.s.copy(),
             x=self.x.copy(),
             u=self.u.copy(),
             m=self.m.copy(),
@@ -203,6 +207,7 @@ class FlowState:
         x: np.ndarray,
         m: np.ndarray,
         eos: EOSBase,
+        enforce_positivity: bool = True,
     ) -> "FlowState":
         """
         Construct a FlowState from conserved variables using EOS.
@@ -212,15 +217,23 @@ class FlowState:
             x: Face positions [m]
             m: Cumulative mass at faces [kg]
             eos: Equation of state for computing thermodynamic properties
+            enforce_positivity: If True, clip non-physical values to small positive numbers
 
         Returns:
             Complete FlowState with all derived quantities
         """
-        tau = conserved.tau
-        u = conserved.u
-        E = conserved.E
+        tau = conserved.tau.copy()
+        u = conserved.u.copy()
+        E = conserved.E.copy()
 
         n_cells = len(tau)
+
+        # Positivity enforcement for robustness with strong shocks
+        # Reference: [Toro2009] Section 6.5 - Positivity preserving schemes
+        if enforce_positivity:
+            # Minimum allowed specific volume (max density ~1e6 kg/m³)
+            tau_min = 1e-10
+            tau = np.maximum(tau, tau_min)
 
         # Compute density from specific volume
         rho = 1.0 / tau
@@ -231,11 +244,25 @@ class FlowState:
         # Compute internal energy from total energy
         e = E - 0.5 * u_cell**2
 
-        # Use EOS to get pressure, temperature, and sound speed
+        # Positivity enforcement for internal energy
+        if enforce_positivity:
+            e_min = 1e-10
+            e = np.maximum(e, e_min)
+            # Update total energy consistently
+            E = e + 0.5 * u_cell**2
+
+        # Use EOS to get pressure, temperature, sound speed, and entropy
         p = eos.pressure(rho, e)
+
+        # Ensure positive pressure
+        if enforce_positivity:
+            p_min = 1e-10
+            p = np.maximum(p, p_min)
+
         T = eos.temperature(rho, e)
         c = eos.sound_speed(rho, p)
         gamma = eos.get_gamma(rho, p)
+        s = eos.entropy(rho, p)
 
         # Compute cell masses
         dm = np.diff(m)
@@ -249,6 +276,7 @@ class FlowState:
             E=E,
             c=c,
             gamma=gamma,
+            s=s,
             x=x,
             u=u,
             m=m,
@@ -291,10 +319,11 @@ class FlowState:
         # Total energy
         E = e + 0.5 * u_cell**2
 
-        # Temperature and sound speed from EOS
+        # Temperature, sound speed, and entropy from EOS
         T = eos.temperature(rho, e)
         c = eos.sound_speed(rho, p)
         gamma = eos.get_gamma(rho, p)
+        s = eos.entropy(rho, p)
 
         # Compute mass coordinates
         dx = np.diff(x)
@@ -311,6 +340,7 @@ class FlowState:
             E=E,
             c=c,
             gamma=gamma,
+            s=s,
             x=x,
             u=u,
             m=m,
@@ -354,6 +384,7 @@ class FlowState:
         self.T[:] = eos.temperature(self.rho, self.e)
         self.c[:] = eos.sound_speed(self.rho, self.p)
         self.gamma[:] = eos.get_gamma(self.rho, self.p)
+        self.s[:] = eos.entropy(self.rho, self.p)
 
         # Mass stays constant in Lagrangian formulation
         # Only positions change, masses dm are fixed

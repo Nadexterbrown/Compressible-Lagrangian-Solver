@@ -113,38 +113,49 @@ class OpenBC(BoundaryCondition):
         """
         Determine the flow regime at the boundary.
 
+        Convention:
+        - Outflow: material leaving the domain through this boundary
+        - Inflow: material entering the domain through this boundary
+
+        At LEFT boundary (x=0): u < 0 means flow to the left, leaving domain = OUTFLOW
+        At RIGHT boundary (x=L): u > 0 means flow to the right, leaving domain = OUTFLOW
+
         Args:
             state: Current flow state
 
         Returns:
             FlowRegime indicating inflow/outflow and subsonic/supersonic
         """
-        idx = self.cell_index
-        u = 0.5 * (state.u[abs(idx)] + state.u[abs(idx) + 1])  # Cell velocity
-        c = state.c[idx]
+        # Get velocity at the boundary face
+        face_idx = self.face_index
+        u = state.u[face_idx]
 
-        # Mach number (use normal velocity component)
+        # Get sound speed from adjacent cell
+        cell_idx = self.cell_index
+        c = state.c[cell_idx]
+
+        mach = abs(u) / c if c > 0 else 0.0
+
+        # Determine if flow is leaving (outflow) or entering (inflow) the domain
         if self._side == BoundarySide.LEFT:
-            # Normal points left (-x), so inflow has u > 0
-            u_normal = u
+            # Left boundary: u < 0 means outflow (leaving through left)
+            is_outflow = u < 0
         else:
-            # Normal points right (+x), so inflow has u < 0
-            u_normal = -u
-
-        mach = abs(u) / c
+            # Right boundary: u > 0 means outflow (leaving through right)
+            is_outflow = u > 0
 
         if mach >= 1.0:
             # Supersonic
-            if u_normal > 0:
-                return FlowRegime.SUPERSONIC_INFLOW
-            else:
+            if is_outflow:
                 return FlowRegime.SUPERSONIC_OUTFLOW
+            else:
+                return FlowRegime.SUPERSONIC_INFLOW
         else:
             # Subsonic
-            if u_normal > 0:
-                return FlowRegime.SUBSONIC_INFLOW
-            else:
+            if is_outflow:
                 return FlowRegime.SUBSONIC_OUTFLOW
+            else:
+                return FlowRegime.SUBSONIC_INFLOW
 
     def apply(
         self,
@@ -209,13 +220,14 @@ class OpenBC(BoundaryCondition):
         Reference: [Poinsot1992] Section 3.2, Equations (29)-(34)
         """
         regime = self.determine_regime(state)
-        idx = self.cell_index
-        p_int = state.p[idx]
-        rho_int = state.rho[idx]
-        c_int = state.c[idx]
+        cell_idx = self.cell_index
+        p_int = state.p[cell_idx]
+        rho_int = state.rho[cell_idx]
+        c_int = state.c[cell_idx]
 
-        # Interior velocity
-        u_int = 0.5 * (state.u[abs(idx)] + state.u[abs(idx) + 1])
+        # Interior velocity at boundary face
+        face_idx = self.face_index
+        u_int = state.u[face_idx]
 
         if regime == FlowRegime.SUPERSONIC_OUTFLOW:
             # All information from interior

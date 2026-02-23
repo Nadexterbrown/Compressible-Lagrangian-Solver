@@ -121,6 +121,20 @@ class EOSBase(ABC):
         """
         pass
 
+    @abstractmethod
+    def entropy(self, rho: np.ndarray, p: np.ndarray) -> np.ndarray:
+        """
+        Compute specific entropy from density and pressure.
+
+        Args:
+            rho: Density [kg/m³]
+            p: Pressure [Pa]
+
+        Returns:
+            Specific entropy [J/(kg·K)]
+        """
+        pass
+
     def complete_state(
         self, rho: float, p: Optional[float] = None, e: Optional[float] = None
     ) -> ThermodynamicState:
@@ -248,7 +262,9 @@ class IdealGasEOS(EOSBase):
         """
         rho = np.asarray(rho)
         p = np.asarray(p)
-        return np.sqrt(self._gamma * p / rho)
+        # Ensure non-negative argument for sqrt (positivity preservation)
+        arg = self._gamma * np.maximum(p, 1e-30) / np.maximum(rho, 1e-30)
+        return np.sqrt(arg)
 
     def internal_energy(self, rho: np.ndarray, p: np.ndarray) -> np.ndarray:
         """
@@ -290,6 +306,38 @@ class IdealGasEOS(EOSBase):
         p = np.asarray(p)
         T = np.asarray(T)
         return p / (self._R * T)
+
+    def entropy(self, rho: np.ndarray, p: np.ndarray) -> np.ndarray:
+        """
+        Compute specific entropy from density and pressure.
+
+        For ideal gas:
+            s = cv * ln(T/T_ref) - R * ln(rho/rho_ref) + s_ref
+
+        Simplified (relative entropy):
+            s = cv * ln(p / rho^gamma) + const
+
+        Using s = cv * ln(T) - R * ln(rho) form:
+
+        Reference: Ideal gas thermodynamics
+        """
+        rho = np.asarray(rho)
+        p = np.asarray(p)
+
+        # Ensure positive values for log (positivity preservation)
+        rho_safe = np.maximum(rho, 1e-30)
+        p_safe = np.maximum(p, 1e-30)
+
+        T = self.temperature_from_rho_p(rho_safe, p_safe)
+        T_safe = np.maximum(T, 1e-30)
+
+        # Specific entropy (relative to reference state)
+        # s - s_ref = cv * ln(T/T_ref) - R * ln(rho/rho_ref)
+        # Using T_ref = 300 K, rho_ref = 1.0 kg/m³
+        T_ref = 300.0
+        rho_ref = 1.0
+        s = self._cv * np.log(T_safe / T_ref) - self._R * np.log(rho_safe / rho_ref)
+        return s
 
 
 class CanteraEOS(EOSBase):
@@ -479,3 +527,19 @@ class CanteraEOS(EOSBase):
             R[i] = self._ct.gas_constant / self._gas.mean_molecular_weight
 
         return R
+
+    def entropy(self, rho: np.ndarray, p: np.ndarray) -> np.ndarray:
+        """
+        Compute specific entropy from density and pressure using Cantera.
+
+        Uses Cantera's accurate calculation of entropy.
+        """
+        rho = np.atleast_1d(rho)
+        p = np.atleast_1d(p)
+        s = np.zeros_like(rho, dtype=float)
+
+        for i in range(len(rho)):
+            self._gas.DP = rho[i], p[i]
+            s[i] = self._gas.entropy_mass
+
+        return s

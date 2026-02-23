@@ -31,6 +31,7 @@ class OutputFrame:
         e: Specific internal energy [J/kg]
         E: Total specific energy [J/kg]
         c: Sound speed [m/s]
+        s: Specific entropy [J/(kg·K)]
     """
 
     time: float
@@ -44,6 +45,7 @@ class OutputFrame:
     e: np.ndarray
     E: np.ndarray
     c: np.ndarray
+    s: np.ndarray
 
     @classmethod
     def from_state(
@@ -62,6 +64,7 @@ class OutputFrame:
             e=state.e.copy(),
             E=state.E.copy(),
             c=state.c.copy(),
+            s=state.s.copy(),
         )
 
 
@@ -146,7 +149,7 @@ class CSVWriter(OutputWriter):
         u_cell = 0.5 * (frame.u[:-1] + frame.u[1:])
 
         # Create header and data
-        header = "x,rho,u,p,T,e,E,c"
+        header = "x,rho,u,p,T,e,E,c,s"
         data = np.column_stack(
             [
                 frame.x_cell,
@@ -157,6 +160,7 @@ class CSVWriter(OutputWriter):
                 frame.e,
                 frame.E,
                 frame.c,
+                frame.s,
             ]
         )
 
