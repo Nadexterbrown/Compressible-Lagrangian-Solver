@@ -37,7 +37,6 @@ from lagrangian_solver.boundary.base import BoundarySide
 
 # Grid parameters
 N_CELLS = 500
-DOMAIN_LENGTH = 1.0  # meters
 
 # STP conditions for air
 T_STP = 298.15  # K
@@ -243,27 +242,31 @@ def exact_piston_solution(
 # Test configurations (keyed by shock Mach number)
 # End times chosen so shock travels ~0.8 of domain length
 # t_end ≈ 0.8 * L / D_shock = 0.8 * L / (M_s * c)
-# For c ≈ 346 m/s and L = 1 m:
+# For c ≈ 346 m/s
 PISTON_TESTS = {
     1: {
         "name": "No shock (M=1)",
         "M_s": 1.0,
         "t_end": 2.0e-3,  # 2 ms
+        "domain": 1.0,    # meters
     },
     2: {
         "name": "Moderate shock (M=2)",
         "M_s": 2.0,
         "t_end": 1.2e-3,  # 1.2 ms
+        "domain": 1.0,    # meters
     },
     3: {
         "name": "Strong shock (M=3)",
         "M_s": 3.0,
         "t_end": 0.8e-3,  # 0.8 ms
+        "domain": 1.0,    # meters
     },
     4: {
         "name": "Very strong shock (M=4)",
         "M_s": 4.0,
         "t_end": 0.6e-3,  # 0.6 ms
+        "domain": 1.0,    # meters
     },
 }
 
@@ -299,6 +302,7 @@ def run_piston_test(
     test_data = PISTON_TESTS[test_num]
     M_s = test_data["M_s"]
     t_end = test_data["t_end"]
+    domain_length = test_data["domain"]
 
     # Compute piston velocity using air properties
     u_piston = compute_piston_velocity(M_s, gamma, c_init)
@@ -308,9 +312,10 @@ def run_piston_test(
     print(f"  Pressure ratio: {P:.2f}")
     print(f"  Piston velocity: {u_piston:.2f} m/s")
     print(f"  Shock speed: {compute_shock_speed(M_s, gamma, c_init):.2f} m/s")
+    print(f"  Domain length: {domain_length:.2f} m")
 
-    # Create grid: piston at x=0, domain [0, 1]
-    grid_config = GridConfig(n_cells=n_cells, x_min=0.0, x_max=DOMAIN_LENGTH)
+    # Create grid: piston at x=0, domain [0, domain_length]
+    grid_config = GridConfig(n_cells=n_cells, x_min=0.0, x_max=domain_length)
     grid = LagrangianGrid(grid_config)
 
     # Create Riemann solver
@@ -371,7 +376,7 @@ def run_piston_test(
     initial_state = create_uniform_state(
         n_cells=n_cells,
         x_left=0.0,
-        x_right=DOMAIN_LENGTH,
+        x_right=domain_length,
         rho=rho_init,
         u=0.0,
         p=P_STP,
@@ -430,6 +435,7 @@ def plot_piston_test(
     test_data = PISTON_TESTS[test_num]
     M_s = test_data["M_s"]
     t_end = test_data["t_end"]
+    domain_length = test_data["domain"]
 
     dt_min_str = f" (dt_min={dt_min:.0e})" if dt_min else ""
     av_str = " [AV enabled]" if use_av else " [no AV]"
@@ -452,7 +458,7 @@ def plot_piston_test(
     R_gas = P_STP / (rho_init * T_STP)  # R = p / (rho * T)
 
     # Compute exact solution
-    x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
+    x_exact = np.linspace(0, domain_length, 500)
     rho_exact, u_exact, p_exact, e_exact, T_exact, s_exact, x_piston, x_shock = exact_piston_solution(
         x_exact, t_plot, 0.0, M_s, gamma, rho_init, P_STP, R=R_gas
     )
@@ -514,7 +520,7 @@ def plot_piston_test(
         ax.set_title(f"{name} {symbol}")
         ax.legend(loc="best", fontsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, DOMAIN_LENGTH)
+        ax.set_xlim(0, domain_length)
 
     plt.tight_layout()
 
@@ -556,6 +562,7 @@ def create_summary_comparison(
         test_data = PISTON_TESTS[test_num]
         M_s = test_data["M_s"]
         t_end = test_data["t_end"]
+        domain_length = test_data["domain"]
 
         # Get numerical solution
         state, grid, stats, failed, error_msg = run_piston_test(
@@ -565,7 +572,7 @@ def create_summary_comparison(
         t_plot = stats.final_time if failed else t_end
 
         # Compute exact solution
-        x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
+        x_exact = np.linspace(0, domain_length, 500)
         rho_exact, u_exact, p_exact, e_exact, T_exact, s_exact, _, _ = exact_piston_solution(
             x_exact, t_plot, 0.0, M_s, gamma, rho_init, P_STP, R=R_gas
         )
@@ -602,7 +609,7 @@ def create_summary_comparison(
                 ax.set_xlabel("x [m]")
 
             ax.grid(True, alpha=0.3)
-            ax.set_xlim(0, DOMAIN_LENGTH)
+            ax.set_xlim(0, domain_length)
 
     av_status = "AV ON" if use_av else "AV OFF"
     fig.suptitle(f"Piston Shock Tests (Air at STP): M_s = 1, 2, 3, 4 [{av_status}]", fontsize=14, fontweight="bold")
