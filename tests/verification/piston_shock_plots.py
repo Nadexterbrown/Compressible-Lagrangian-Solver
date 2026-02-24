@@ -338,15 +338,15 @@ def run_piston_test(
     )
 
     # Set up artificial viscosity if enabled
-    # Uses Von Neumann-Richtmyer + Landshoff + Noh's heat conduction
-    # Reference: [Noh2001], [Margolin2022]
-    # Note: c_heat is kept small (0.01) to avoid excessive cooling at boundaries
+    # Uses Von Neumann-Richtmyer + Landshoff viscosity for shock capturing
+    # Reference: [Margolin2022], [Toro2009] Section 11.3
+    # Note: c_heat=0 disables artificial heat conduction to avoid temperature errors
     if use_av:
         if av_config is None:
             av_config = ArtificialViscosityConfig(
                 c_quad=2.0,   # Quadratic coefficient (shock capturing)
                 c_lin=0.5,    # Linear coefficient (oscillation damping)
-                c_heat=0.01,  # Heat conduction (wall heating fix) - small to avoid over-cooling
+                c_heat=0.0,   # Disabled - causes temperature errors near boundaries
                 enabled=True,
             )
     else:
@@ -539,90 +539,6 @@ def plot_piston_test(
     return failed
 
 
-def create_summary_comparison(
-    output_dir: Path,
-    eos: CanteraEOS,
-    rho_init: float,
-    gamma: float,
-    c_init: float,
-    dt_min: float = None,
-    use_av: bool = True,
-):
-    """
-    Create a summary figure comparing all piston shock tests.
-    Shows all 6 variables: density, velocity, pressure, temperature, internal energy, entropy.
-    """
-    # Get gas constant from EOS (for air)
-    eos.set_state_TP(T_STP, P_STP)
-    R_gas = P_STP / (rho_init * T_STP)
-
-    fig, axes = plt.subplots(4, 6, figsize=(20, 14))
-
-    for row, test_num in enumerate([1, 2, 3, 4]):
-        test_data = PISTON_TESTS[test_num]
-        M_s = test_data["M_s"]
-        t_end = test_data["t_end"]
-        domain_length = test_data["domain"]
-
-        # Get numerical solution
-        state, grid, stats, failed, error_msg = run_piston_test(
-            test_num, eos, rho_init, gamma, c_init, dt_min=dt_min, use_av=use_av
-        )
-
-        t_plot = stats.final_time if failed else t_end
-
-        # Compute exact solution
-        x_exact = np.linspace(0, domain_length, 500)
-        rho_exact, u_exact, p_exact, e_exact, T_exact, s_exact, _, _ = exact_piston_solution(
-            x_exact, t_plot, 0.0, M_s, gamma, rho_init, P_STP, R=R_gas
-        )
-
-        # Numerical solution
-        x_num = grid.x_cell
-        rho_num = state.rho
-        u_num = 0.5 * (state.u[:-1] + state.u[1:])
-        p_num = state.p
-        e_num = state.e
-        T_num = state.T
-        s_num = state.s
-
-        variables = [
-            ("rho [kg/m^3]", rho_exact, rho_num),
-            ("u [m/s]", u_exact, u_num),
-            ("p [Pa]", p_exact, p_num),
-            ("T [K]", T_exact, T_num),
-            ("e [J/kg]", e_exact, e_num),
-            ("s [J/(kg*K)]", s_exact, s_num),
-        ]
-
-        for col, (name, exact, num) in enumerate(variables):
-            ax = axes[row, col]
-            ax.plot(x_exact, exact, "b-", linewidth=1.5, label="Exact")
-            ax.plot(x_num, num, "r.", markersize=2, label="Numerical")
-
-            if col == 0:
-                status = " (FAILED)" if failed else ""
-                ax.set_ylabel(f"M={test_num}{status}")
-            if row == 0:
-                ax.set_title(name)
-            if row == 3:
-                ax.set_xlabel("x [m]")
-
-            ax.grid(True, alpha=0.3)
-            ax.set_xlim(0, domain_length)
-
-    av_status = "AV ON" if use_av else "AV OFF"
-    fig.suptitle(f"Piston Shock Tests (Air at STP): M_s = 1, 2, 3, 4 [{av_status}]", fontsize=14, fontweight="bold")
-    plt.tight_layout()
-
-    suffix = "_dtmin" if dt_min else ""
-    av_suffix = "_av" if use_av else "_noav"
-    filename = f"piston_shock_summary{suffix}{av_suffix}.png"
-    fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
-    print(f"Saved: {filename}")
-    plt.close(fig)
-
-
 def main():
     """Main entry point."""
     output_dir = Path(__file__).parent / "output"
@@ -657,12 +573,6 @@ def main():
         plot_piston_test(test_num, output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=True)
         print()
 
-    # Create summary with AV
-    print("-" * 70)
-    print("Creating summary figure (with AV)...")
-    print("-" * 70)
-    create_summary_comparison(output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=True)
-
     # Run tests WITHOUT artificial viscosity for comparison
     print("\n" + "-" * 70)
     print("Running tests WITHOUT artificial viscosity (for comparison)...")
@@ -672,15 +582,9 @@ def main():
         plot_piston_test(test_num, output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=False)
         print()
 
-    # Create summary without AV
-    print("-" * 70)
-    print("Creating summary figure (without AV)...")
-    print("-" * 70)
-    create_summary_comparison(output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=False)
-
     print("\n" + "=" * 70)
     print("VERIFICATION COMPLETE")
-    print("Compare *_av.png vs *_noav.png to see wall heating fix effect")
+    print("Compare *_av.png vs *_noav.png to see artificial viscosity effect")
     print("=" * 70)
 
 
