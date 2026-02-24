@@ -244,12 +244,11 @@ class FlowState:
         # Compute internal energy from total energy
         e = E - 0.5 * u_cell**2
 
-        # Positivity enforcement for internal energy
-        if enforce_positivity:
-            e_min = 1e-10
-            e = np.maximum(e, e_min)
-            # Update total energy consistently
-            E = e + 0.5 * u_cell**2
+        # NOTE: We do NOT enforce positivity on internal energy here.
+        # Cantera and other real-gas EOS use formation enthalpy references
+        # where internal energy can be legitimately negative.
+        # For air at STP, Cantera returns e ≈ -85884 J/kg.
+        # Positivity is enforced on PRESSURE instead (which must always be positive).
 
         # Use EOS to get pressure, temperature, sound speed, and entropy
         p = eos.pressure(rho, e)
