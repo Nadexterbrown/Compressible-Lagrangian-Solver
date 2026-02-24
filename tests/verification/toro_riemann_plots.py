@@ -25,6 +25,7 @@ from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.core.state import create_riemann_state
 from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver, RiemannState
+from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosityConfig
 from lagrangian_solver.boundary.wall import SolidWallBC
 from lagrangian_solver.boundary.base import BoundarySide
 from lagrangian_solver.boundary.open import OpenBC
@@ -108,6 +109,7 @@ def run_toro_test(
     n_cells: int = N_CELLS,
     dt_min: float = None,
     verbose: bool = False,
+    use_av: bool = True,
 ):
     """
     Run a single Toro test and return numerical solution.
@@ -118,6 +120,7 @@ def run_toro_test(
         n_cells: Number of cells
         dt_min: Minimum time step floor (None for no floor)
         verbose: Print progress
+        use_av: Whether to enable artificial viscosity (default: True)
 
     Returns:
         Tuple of (state, grid, statistics)
@@ -151,6 +154,19 @@ def run_toro_test(
         rho_external=right_data["rho"],
     )
 
+    # Set up artificial viscosity if enabled
+    # Uses Von Neumann-Richtmyer + Landshoff + Noh's heat conduction
+    # Reference: [Noh2001], [Margolin2022]
+    if use_av:
+        av_config = ArtificialViscosityConfig(
+            c_quad=2.0,   # Quadratic coefficient (shock capturing)
+            c_lin=0.5,    # Linear coefficient (oscillation damping)
+            c_heat=0.1,   # Heat conduction (wall heating fix)
+            enabled=True,
+        )
+    else:
+        av_config = None
+
     # Solver configuration with optional dt_min
     solver_config = SolverConfig(
         cfl=0.5,
@@ -158,6 +174,7 @@ def run_toro_test(
         dt_output=test_data["t_end"],
         dt_min=dt_min,
         verbose=verbose,
+        artificial_viscosity=av_config,
     )
 
     # Create solver
@@ -195,7 +212,7 @@ def run_toro_test(
     return solver.state, solver.grid, stats, failed, error_msg
 
 
-def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = None, normalize_x: bool = False):
+def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = None, use_av: bool = True):
     """
     Plot exact vs numerical comparison for a single Toro test.
 
@@ -203,17 +220,17 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
         test_num: Toro test number (1-5)
         output_dir: Directory for output plots
         dt_min: Optional minimum time step floor
-        normalize_x: If True, normalize Lagrangian positions back to [0,1]
+        use_av: Whether to enable artificial viscosity (default: True)
     """
     test_data = TORO_TESTS[test_num]
     eos = IdealGasEOS(gamma=GAMMA)
 
     dt_min_str = f" (dt_min={dt_min:.0e})" if dt_min else ""
-    norm_str = " [x normalized]" if normalize_x else ""
-    print(f"Running Toro Test {test_num}: {test_data['name']}{dt_min_str}{norm_str}...")
+    av_str = " [AV enabled]" if use_av else " [no AV]"
+    print(f"Running Toro Test {test_num}: {test_data['name']}{dt_min_str}{av_str}...")
 
     # Get numerical solution (may return partial results on failure)
-    state, grid, stats, failed, error_msg = run_toro_test(test_num, eos, dt_min=dt_min)
+    state, grid, stats, failed, error_msg = run_toro_test(test_num, eos, dt_min=dt_min, use_av=use_av)
 
     if failed:
         print(f"  WARNING: Simulation failed at t={stats.final_time:.4e}: {error_msg}")
@@ -229,27 +246,14 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
         test_data["x_disc"], test_data["t_end"]
     )
 
-    # Numerical solution - get Lagrangian cell positions
-    x_num_raw = grid.x_cell
+    # Numerical solution
+    x_num = grid.x_cell
     rho_num = state.rho
     u_num = 0.5 * (state.u[:-1] + state.u[1:])
     p_num = state.p
     e_num = state.e
     T_num = state.T
     s_num = state.s
-
-    # Normalize Lagrangian positions back to [0,1] if requested
-    # This maps the deformed Lagrangian grid back to the original reference frame
-    if normalize_x:
-        x_min = x_num_raw.min()
-        x_max = x_num_raw.max()
-        if x_max > x_min:
-            x_num = (x_num_raw - x_min) / (x_max - x_min)
-        else:
-            x_num = x_num_raw  # Fallback if all positions collapsed
-        print(f"  Position range: [{x_min:.4f}, {x_max:.4f}] -> normalized to [0, 1]")
-    else:
-        x_num = x_num_raw
 
     # Exact entropy and temperature
     T_exact = p_exact / (rho_exact * (GAMMA - 1) / eos.cv)  # From e = cv*T
@@ -261,8 +265,8 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
 
     # Build title with stats
     status_str = "FAILED" if failed else ""
-    norm_status = "[x normalized]" if normalize_x else ""
-    title_lines = [f"Toro Test {test_num}: {test_data['name']} {norm_status} {status_str}"]
+    av_status = "[AV ON]" if use_av else "[AV OFF]"
+    title_lines = [f"Toro Test {test_num}: {test_data['name']} {av_status} {status_str}"]
     t_reached = stats.final_time
     title_lines.append(f"t = {t_reached:.4e} / {test_data['t_end']}, N = {N_CELLS} cells, steps = {stats.n_steps}")
     if dt_min:
@@ -299,8 +303,8 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
     # Save figure
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_dtmin" if dt_min else ""
-    norm_suffix = "_xnorm" if normalize_x else ""
-    filename = f"toro_test_{test_num}_comparison{suffix}{norm_suffix}.png"
+    av_suffix = "_av" if use_av else "_noav"
+    filename = f"toro_test_{test_num}_comparison{suffix}{av_suffix}.png"
     fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
     print(f"  Saved: {filename}")
     print(f"    Steps: {stats.n_steps}, Wall time: {stats.wall_time:.2f}s, "
@@ -311,14 +315,15 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
     return x_num, rho_num, u_num, p_num, stats, failed
 
 
-def create_all_tests_comparison(output_dir: Path):
+def create_all_tests_comparison(output_dir: Path, use_av: bool = True):
     """Create a summary figure comparing all 5 tests."""
     eos = IdealGasEOS(gamma=GAMMA)
     riemann_solver = ExactRiemannSolver(eos)
 
     fig, axes = plt.subplots(5, 4, figsize=(16, 20))
+    av_status = "AV ON" if use_av else "AV OFF"
     fig.suptitle(
-        "Toro's Five Riemann Problems - Exact vs Numerical\n"
+        f"Toro's Five Riemann Problems - Exact vs Numerical [{av_status}]\n"
         f"N = {N_CELLS} cells, Reference: [Toro2009] Section 4.3.3",
         fontsize=14,
         fontweight="bold",
@@ -328,7 +333,7 @@ def create_all_tests_comparison(output_dir: Path):
         test_data = TORO_TESTS[test_num]
 
         # Get numerical solution
-        state, grid, stats, failed, error_msg = run_toro_test(test_num, eos)
+        state, grid, stats, failed, error_msg = run_toro_test(test_num, eos, use_av=use_av)
 
         # Get exact solution
         left = create_riemann_state_obj(test_data["left"], GAMMA)
@@ -408,12 +413,12 @@ def main():
     print("Reference: [Toro2009] Section 4.3.3, Table 4.1")
     print("=" * 70 + "\n")
 
-    # Run Tests 1-4 with dt_min floor
+    # Run Tests 1-4 with dt_min floor and artificial viscosity
     print("-" * 70)
-    print("TESTS 1-4 (dt_min = 1e-9)")
+    print("TESTS 1-4 (dt_min = 1e-9, AV enabled)")
     print("-" * 70)
     for test_num in range(1, 5):
-        plot_toro_test_comparison(test_num, output_dir, dt_min=1e-9)
+        plot_toro_test_comparison(test_num, output_dir, dt_min=1e-9, use_av=True)
 
     # Test 5: Two shock collision
     # NOTE: This test is challenging for pure Lagrangian methods because
@@ -424,19 +429,12 @@ def main():
     print("-" * 70)
     print("  NOTE: Test 5 may fail due to cell collapse from shock-shock")
     print("  interaction. This is a fundamental Lagrangian limitation.")
-    plot_toro_test_comparison(5, output_dir, dt_min=1e-9, normalize_x=False)
+    plot_toro_test_comparison(5, output_dir, dt_min=1e-9, use_av=True)
 
-    # Test 5 with normalized positions - maps Lagrangian positions back to [0,1]
-    print("\n" + "-" * 70)
-    print("TEST 5 (Two Shock Collision, dt_min = 1e-9, x normalized)")
-    print("-" * 70)
-    print("  Normalizing Lagrangian positions back to [0,1] for comparison")
-    plot_toro_test_comparison(5, output_dir, dt_min=1e-9, normalize_x=True)
-
-    # Create summary comparison (uses standard CFL for all)
+    # Create summary comparison (with AV)
     print("\n" + "-" * 70)
     print("Creating summary comparison figure...")
-    create_all_tests_comparison(output_dir)
+    create_all_tests_comparison(output_dir, use_av=True)
 
     print(f"\nAll plots saved to: {output_dir}")
 
