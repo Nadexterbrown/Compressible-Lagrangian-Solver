@@ -157,11 +157,12 @@ def run_toro_test(
     # Set up artificial viscosity if enabled
     # Uses Von Neumann-Richtmyer + Landshoff + Noh's heat conduction
     # Reference: [Noh2001], [Margolin2022]
+    # Note: c_heat is kept small (0.01) to avoid excessive cooling
     if use_av:
         av_config = ArtificialViscosityConfig(
             c_quad=2.0,   # Quadratic coefficient (shock capturing)
             c_lin=0.5,    # Linear coefficient (oscillation damping)
-            c_heat=0.1,   # Heat conduction (wall heating fix)
+            c_heat=0.01,  # Heat conduction (wall heating fix) - small to avoid over-cooling
             enabled=True,
         )
     else:
@@ -169,7 +170,7 @@ def run_toro_test(
 
     # Solver configuration with optional dt_min
     solver_config = SolverConfig(
-        cfl=0.5,
+        cfl=0.3,
         t_end=test_data["t_end"],
         dt_output=test_data["t_end"],
         dt_min=dt_min,

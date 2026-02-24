@@ -37,7 +37,7 @@ from lagrangian_solver.boundary.base import BoundarySide
 
 # Grid parameters
 N_CELLS = 500
-DOMAIN_LENGTH = 5.0  # meters
+DOMAIN_LENGTH = 1.0  # meters
 
 # STP conditions for air
 T_STP = 298.15  # K
@@ -335,12 +335,13 @@ def run_piston_test(
     # Set up artificial viscosity if enabled
     # Uses Von Neumann-Richtmyer + Landshoff + Noh's heat conduction
     # Reference: [Noh2001], [Margolin2022]
+    # Note: c_heat is kept small (0.01) to avoid excessive cooling at boundaries
     if use_av:
         if av_config is None:
             av_config = ArtificialViscosityConfig(
                 c_quad=2.0,   # Quadratic coefficient (shock capturing)
                 c_lin=0.5,    # Linear coefficient (oscillation damping)
-                c_heat=0.1,   # Heat conduction (wall heating fix)
+                c_heat=0.01,  # Heat conduction (wall heating fix) - small to avoid over-cooling
                 enabled=True,
             )
     else:
@@ -348,7 +349,7 @@ def run_piston_test(
 
     # Solver configuration
     solver_config = SolverConfig(
-        cfl=0.5,
+        cfl=0.3,
         t_end=t_end,
         dt_output=t_end,
         dt_min=dt_min,

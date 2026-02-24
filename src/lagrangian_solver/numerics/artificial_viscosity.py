@@ -50,7 +50,8 @@ class ArtificialViscosityConfig:
         for du/dx < 0 (compression), Q = 0 otherwise
 
     The artificial heat flux is (Noh's fix for wall heating):
-        q = c_heat * rho * c * dx * dT/dx
+        q = c_heat * rho * c * dT
+    Applied only in compression zones to avoid excessive cooling.
 
     Attributes:
         c_quad: Quadratic viscosity coefficient (shock capturing)
@@ -58,16 +59,17 @@ class ArtificialViscosityConfig:
         c_lin: Linear viscosity coefficient (post-shock oscillation damping)
                Typical value: 0.5
         c_heat: Artificial heat conduction coefficient (wall heating fix)
-                Typical value: 0.1-1.0 (depends on application)
+                Typical value: 0.01-0.1 (use smaller values for strong shocks)
         enabled: Whether artificial viscosity is active
 
     Reference:
         [Margolin2022] Section 2.1 for coefficient recommendations
+        [Noh2001] for artificial heat conduction
     """
 
     c_quad: float = 2.0
     c_lin: float = 0.5
-    c_heat: float = 0.1
+    c_heat: float = 0.01  # Reduced from 0.1 to avoid over-cooling
     enabled: bool = True
 
 
@@ -182,8 +184,11 @@ class ArtificialViscosity:
 
         Noh's artificial heat conduction to prevent wall heating:
 
-            q_{i+1/2} = c_H * rho_{i+1/2} * c_{i+1/2} * dx_{avg} * (T_{i+1} - T_i) / dx_{avg}
-                      = c_H * rho_{i+1/2} * c_{i+1/2} * (T_{i+1} - T_i)
+            q_{i+1/2} = c_H * rho_{i+1/2} * c_{i+1/2} * (T_{i+1} - T_i)
+
+        IMPORTANT: Heat conduction is only applied at faces adjacent to cells
+        that are in compression (where artificial viscosity Q > 0). This
+        prevents excessive heat redistribution in smooth flow regions.
 
         This redistributes heat from hot regions (like the piston face after
         shock reflection) to cooler regions, eliminating the wall heating error.
@@ -202,12 +207,23 @@ class ArtificialViscosity:
         if not self._config.enabled or self._config.c_heat <= 0:
             return np.zeros(state.n_faces)
 
+        n_cells = state.n_cells
         n_faces = state.n_faces
         q_heat = np.zeros(n_faces)
+
+        # Determine which cells are in compression
+        dx = state.dx
+        du = state.u[1:] - state.u[:-1]
+        du_dx = du / dx
+        in_compression = du_dx < 0  # shape (n_cells,)
 
         # Interior faces (1 to n_faces-2)
         for i in range(1, n_faces - 1):
             # Face i is between cells i-1 and i
+            # Only apply heat conduction if at least one adjacent cell is compressing
+            if not (in_compression[i - 1] or in_compression[i]):
+                continue
+
             # Average properties at face
             rho_face = 0.5 * (state.rho[i - 1] + state.rho[i])
             c_face = 0.5 * (state.c[i - 1] + state.c[i])
@@ -215,11 +231,7 @@ class ArtificialViscosity:
             # Temperature gradient
             dT = state.T[i] - state.T[i - 1]
 
-            # Cell widths on either side
-            dx_avg = 0.5 * (state.dx[i - 1] + state.dx[i])
-
             # Artificial heat flux: q = c_H * rho * c * dT
-            # (simplified form, dx terms cancel when used consistently)
             q_heat[i] = self._config.c_heat * rho_face * c_face * dT
 
         # Boundary faces: extrapolate or set to zero
