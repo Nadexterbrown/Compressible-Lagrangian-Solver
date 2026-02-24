@@ -141,11 +141,11 @@ class LagrangianConservation:
             )
 
             # Solve Riemann problem to get interface pressure and velocity
-            p_star, pu_star = self._riemann_solver.compute_flux(left, right)
+            p_star, u_star = self._riemann_solver.compute_flux(left, right)
 
             p_flux[i] = p_star
-            u_flux[i] = pu_star / p_star if abs(p_star) > 1e-10 else 0.0
-            pu_flux[i] = pu_star
+            u_flux[i] = u_star  # Direct assignment - no division needed
+            pu_flux[i] = p_star * u_star
 
         return LagrangianFlux(p_flux=p_flux, pu_flux=pu_flux, u_flux=u_flux)
 

@@ -135,7 +135,7 @@ class RiemannSolverBase(ABC):
             right: Right state
 
         Returns:
-            Tuple of (pressure_flux, energy_flux)
+            Tuple of (pressure_flux, velocity_star)
         """
         pass
 
@@ -185,11 +185,33 @@ class ExactRiemannSolver(RiemannSolverBase):
         self.last_iteration_count = 0
         self.last_converged = False
 
-        # Assume ideal gas for now (can be extended for general EOS)
+        # Handle gamma for different EOS types
         if isinstance(eos, IdealGasEOS):
             self._gamma = eos.gamma
+            self._use_variable_gamma = False
         else:
             self._gamma = 1.4  # Default fallback
+            self._use_variable_gamma = True
+
+    def _get_gamma(self, rho: float, p: float) -> float:
+        """
+        Get gamma for the given state.
+
+        For IdealGasEOS, returns the constant gamma.
+        For other EOS (e.g., CanteraEOS), queries the EOS for state-dependent gamma.
+
+        Args:
+            rho: Density [kg/m³]
+            p: Pressure [Pa]
+
+        Returns:
+            Ratio of specific heats gamma = cp/cv
+        """
+        if not self._use_variable_gamma:
+            return self._gamma
+        if hasattr(self._eos, 'get_gamma'):
+            return float(self._eos.get_gamma(np.atleast_1d(rho), np.atleast_1d(p))[0])
+        return self._gamma
 
     def _pressure_function(
         self, p: float, rho_K: float, p_K: float, c_K: float
@@ -348,6 +370,12 @@ class ExactRiemannSolver(RiemannSolverBase):
 
         Reference: [Toro2009] Section 4.3, Algorithm 4.1
         """
+        # For variable gamma EOS, compute averaged gamma from left/right states
+        if self._use_variable_gamma:
+            gamma_L = self._get_gamma(left.rho, left.p)
+            gamma_R = self._get_gamma(right.rho, right.p)
+            self._gamma = 0.5 * (gamma_L + gamma_R)
+
         # Check for vacuum generation
         du = right.u - left.u
         critical_velocity = (
@@ -422,16 +450,15 @@ class ExactRiemannSolver(RiemannSolverBase):
         coordinates), the flux is simply the star state values.
 
         Reference: [Despres2017] Section 4.2
+
+        Returns:
+            Tuple of (pressure_flux, velocity_star)
         """
         solution = self.solve(left, right)
 
-        # In Lagrangian formulation:
-        # - Momentum flux = pressure at interface
-        # - Energy flux = p * u at interface
-        p_flux = solution.p_star
-        e_flux = solution.p_star * solution.u_star
-
-        return p_flux, e_flux
+        # Return p_star and u_star directly
+        # The caller computes pu_flux = p_star * u_star
+        return solution.p_star, solution.u_star
 
     def sample(
         self,
@@ -643,16 +670,19 @@ class HLLCRiemannSolver(RiemannSolverBase):
         Compute HLLC numerical flux at interface.
 
         Reference: [Toro2009] Section 10.4, Equations (10.37)-(10.40)
+
+        Returns:
+            Tuple of (pressure_flux, velocity_star)
         """
         S_L, S_star, S_R = self._wave_speed_estimates(left, right)
 
         # In Lagrangian formulation at x/t = 0:
         if S_L >= 0:
             # All waves moving right - use left state
-            return left.p, left.p * left.u
+            return left.p, left.u
         elif S_R <= 0:
             # All waves moving left - use right state
-            return right.p, right.p * right.u
+            return right.p, right.u
         else:
             # Interface is in star region
             if S_star >= 0:
@@ -662,4 +692,5 @@ class HLLCRiemannSolver(RiemannSolverBase):
                 # Right star region
                 p_star = right.p + right.rho * (S_R - right.u) * (S_star - right.u)
 
-            return p_star, p_star * S_star
+            # Return p_star and S_star (which is u_star)
+            return p_star, S_star
