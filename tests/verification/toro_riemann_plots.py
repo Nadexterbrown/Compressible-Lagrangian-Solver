@@ -195,7 +195,7 @@ def run_toro_test(
     return solver.state, solver.grid, stats, failed, error_msg
 
 
-def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = None):
+def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = None, normalize_x: bool = False):
     """
     Plot exact vs numerical comparison for a single Toro test.
 
@@ -203,12 +203,14 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
         test_num: Toro test number (1-5)
         output_dir: Directory for output plots
         dt_min: Optional minimum time step floor
+        normalize_x: If True, normalize Lagrangian positions back to [0,1]
     """
     test_data = TORO_TESTS[test_num]
     eos = IdealGasEOS(gamma=GAMMA)
 
     dt_min_str = f" (dt_min={dt_min:.0e})" if dt_min else ""
-    print(f"Running Toro Test {test_num}: {test_data['name']}{dt_min_str}...")
+    norm_str = " [x normalized]" if normalize_x else ""
+    print(f"Running Toro Test {test_num}: {test_data['name']}{dt_min_str}{norm_str}...")
 
     # Get numerical solution (may return partial results on failure)
     state, grid, stats, failed, error_msg = run_toro_test(test_num, eos, dt_min=dt_min)
@@ -227,14 +229,27 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
         test_data["x_disc"], test_data["t_end"]
     )
 
-    # Numerical solution
-    x_num = grid.x_cell
+    # Numerical solution - get Lagrangian cell positions
+    x_num_raw = grid.x_cell
     rho_num = state.rho
     u_num = 0.5 * (state.u[:-1] + state.u[1:])
     p_num = state.p
     e_num = state.e
     T_num = state.T
     s_num = state.s
+
+    # Normalize Lagrangian positions back to [0,1] if requested
+    # This maps the deformed Lagrangian grid back to the original reference frame
+    if normalize_x:
+        x_min = x_num_raw.min()
+        x_max = x_num_raw.max()
+        if x_max > x_min:
+            x_num = (x_num_raw - x_min) / (x_max - x_min)
+        else:
+            x_num = x_num_raw  # Fallback if all positions collapsed
+        print(f"  Position range: [{x_min:.4f}, {x_max:.4f}] -> normalized to [0, 1]")
+    else:
+        x_num = x_num_raw
 
     # Exact entropy and temperature
     T_exact = p_exact / (rho_exact * (GAMMA - 1) / eos.cv)  # From e = cv*T
@@ -246,7 +261,8 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
 
     # Build title with stats
     status_str = "FAILED" if failed else ""
-    title_lines = [f"Toro Test {test_num}: {test_data['name']} {status_str}"]
+    norm_status = "[x normalized]" if normalize_x else ""
+    title_lines = [f"Toro Test {test_num}: {test_data['name']} {norm_status} {status_str}"]
     t_reached = stats.final_time
     title_lines.append(f"t = {t_reached:.4e} / {test_data['t_end']}, N = {N_CELLS} cells, steps = {stats.n_steps}")
     if dt_min:
@@ -283,7 +299,8 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
     # Save figure
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_dtmin" if dt_min else ""
-    filename = f"toro_test_{test_num}_comparison{suffix}.png"
+    norm_suffix = "_xnorm" if normalize_x else ""
+    filename = f"toro_test_{test_num}_comparison{suffix}{norm_suffix}.png"
     fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
     print(f"  Saved: {filename}")
     print(f"    Steps: {stats.n_steps}, Wall time: {stats.wall_time:.2f}s, "
@@ -407,7 +424,14 @@ def main():
     print("-" * 70)
     print("  NOTE: Test 5 may fail due to cell collapse from shock-shock")
     print("  interaction. This is a fundamental Lagrangian limitation.")
-    plot_toro_test_comparison(5, output_dir, dt_min=1e-9)
+    plot_toro_test_comparison(5, output_dir, dt_min=1e-9, normalize_x=False)
+
+    # Test 5 with normalized positions - maps Lagrangian positions back to [0,1]
+    print("\n" + "-" * 70)
+    print("TEST 5 (Two Shock Collision, dt_min = 1e-9, x normalized)")
+    print("-" * 70)
+    print("  Normalizing Lagrangian positions back to [0,1] for comparison")
+    plot_toro_test_comparison(5, output_dir, dt_min=1e-9, normalize_x=True)
 
     # Create summary comparison (uses standard CFL for all)
     print("\n" + "-" * 70)
