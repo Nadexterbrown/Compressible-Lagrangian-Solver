@@ -181,10 +181,18 @@ def run_toro_test(
         p_R=test_data["right"]["p"],
     )
 
-    # Run simulation
-    stats = solver.run()
+    # Run simulation - catch failures and return partial results
+    try:
+        stats = solver.run()
+        failed = False
+        error_msg = None
+    except Exception as e:
+        # Get partial stats from solver
+        stats = solver.statistics
+        failed = True
+        error_msg = str(e)
 
-    return solver.state, solver.grid, stats
+    return solver.state, solver.grid, stats, failed, error_msg
 
 
 def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = None):
@@ -202,8 +210,12 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
     dt_min_str = f" (dt_min={dt_min:.0e})" if dt_min else ""
     print(f"Running Toro Test {test_num}: {test_data['name']}{dt_min_str}...")
 
-    # Get numerical solution
-    state, grid, stats = run_toro_test(test_num, eos, dt_min=dt_min)
+    # Get numerical solution (may return partial results on failure)
+    state, grid, stats, failed, error_msg = run_toro_test(test_num, eos, dt_min=dt_min)
+
+    if failed:
+        print(f"  WARNING: Simulation failed at t={stats.final_time:.4e}: {error_msg}")
+        print(f"  Generating plot with partial results...")
 
     # Get exact solution
     riemann_solver = ExactRiemannSolver(eos)
@@ -233,10 +245,15 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
     # Build title with stats
-    title_lines = [f"Toro Test {test_num}: {test_data['name']}"]
-    title_lines.append(f"t = {test_data['t_end']}, N = {N_CELLS} cells, steps = {stats.n_steps}")
+    status_str = "FAILED" if failed else ""
+    title_lines = [f"Toro Test {test_num}: {test_data['name']} {status_str}"]
+    t_reached = stats.final_time
+    title_lines.append(f"t = {t_reached:.4e} / {test_data['t_end']}, N = {N_CELLS} cells, steps = {stats.n_steps}")
     if dt_min:
-        title_lines.append(f"dt_min = {dt_min:.0e} (min_dt used: {stats.min_dt:.2e})")
+        min_dt_str = f"{stats.min_dt:.2e}" if stats.min_dt < float('inf') else "N/A"
+        title_lines.append(f"dt_min = {dt_min:.0e} (min_dt used: {min_dt_str})")
+    if failed:
+        title_lines.append(f"Error: {error_msg[:60]}..." if len(error_msg) > 60 else f"Error: {error_msg}")
 
     fig.suptitle("\n".join(title_lines), fontsize=14, fontweight="bold")
 
@@ -274,7 +291,7 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
 
     plt.close(fig)
 
-    return x_num, rho_num, u_num, p_num, stats
+    return x_num, rho_num, u_num, p_num, stats, failed
 
 
 def create_all_tests_comparison(output_dir: Path):
@@ -294,7 +311,7 @@ def create_all_tests_comparison(output_dir: Path):
         test_data = TORO_TESTS[test_num]
 
         # Get numerical solution
-        state, grid, stats = run_toro_test(test_num, eos)
+        state, grid, stats, failed, error_msg = run_toro_test(test_num, eos)
 
         # Get exact solution
         left = create_riemann_state_obj(test_data["left"], GAMMA)
@@ -374,27 +391,23 @@ def main():
     print("Reference: [Toro2009] Section 4.3.3, Table 4.1")
     print("=" * 70 + "\n")
 
-    # Run Tests 1-4 without dt_min
+    # Run Tests 1-4 with dt_min floor
     print("-" * 70)
-    print("TESTS 1-4 (Standard CFL)")
+    print("TESTS 1-4 (dt_min = 1e-9)")
     print("-" * 70)
     for test_num in range(1, 5):
-        plot_toro_test_comparison(test_num, output_dir)
+        plot_toro_test_comparison(test_num, output_dir, dt_min=1e-9)
 
     # Test 5: Two shock collision
     # NOTE: This test is challenging for pure Lagrangian methods because
     # the converging shocks physically compress the material between them
     # to near-zero thickness, causing cell collapse regardless of dt_min.
     print("\n" + "-" * 70)
-    print("TEST 5 (Two Shock Collision)")
+    print("TEST 5 (Two Shock Collision, dt_min = 1e-9)")
     print("-" * 70)
     print("  NOTE: Test 5 may fail due to cell collapse from shock-shock")
     print("  interaction. This is a fundamental Lagrangian limitation.")
-    try:
-        plot_toro_test_comparison(5, output_dir)
-    except ValueError as e:
-        print(f"  Test 5 FAILED: {e}")
-        print("  This is expected for pure Lagrangian methods with shock collision.")
+    plot_toro_test_comparison(5, output_dir, dt_min=1e-9)
 
     # Create summary comparison (uses standard CFL for all)
     print("\n" + "-" * 70)

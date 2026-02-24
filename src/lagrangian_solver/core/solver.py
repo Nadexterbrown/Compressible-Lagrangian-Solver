@@ -298,6 +298,13 @@ class LagrangianSolver:
         if self._state is None:
             raise RuntimeError("Initial condition not set")
 
+        # Apply boundary velocities before computing time step
+        # This ensures CFL accounts for moving boundaries (e.g., supersonic piston)
+        if self._bc_left is not None:
+            self._bc_left.apply(self._state, self._grid, self._time)
+        if self._bc_right is not None:
+            self._bc_right.apply(self._state, self._grid, self._time)
+
         # Compute time step if not provided
         if dt is None:
             ts_info = self._integrator.compute_timestep(self._state, self._grid)

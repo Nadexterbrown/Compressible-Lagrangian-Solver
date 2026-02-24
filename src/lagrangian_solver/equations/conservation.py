@@ -176,13 +176,13 @@ class LagrangianConservation:
         for i in range(n_cells):
             d_tau[i] = (fluxes.u_flux[i + 1] - fluxes.u_flux[i]) / dm[i]
 
-        # Velocity rate at faces: du/dt = -(p_{i+1} - p_i) / (½(dm_i + dm_{i+1}))
-        # For interior faces, use average of neighboring cell masses
+        # Velocity rate at faces: du/dt = -(p_i - p_{i-1}) / dm_face
+        # Uses cell-centered pressures, not face pressures
         # For boundary faces, this is handled by boundary conditions
         d_u = np.zeros(state.n_faces)
         for i in range(1, n_cells):
             dm_avg = 0.5 * (dm[i - 1] + dm[i])
-            d_u[i] = -(fluxes.p_flux[i + 1] - fluxes.p_flux[i - 1]) / (2 * dm_avg)
+            d_u[i] = -(state.p[i] - state.p[i - 1]) / dm_avg
 
         # Energy rate: dE/dt = -(pu_{i+1} - pu_i) / dm_i
         d_E = np.zeros(n_cells)

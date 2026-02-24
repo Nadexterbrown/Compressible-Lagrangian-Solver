@@ -91,11 +91,14 @@ class TimeIntegratorBase(ABC):
         dx = grid.dx
         c = state.c
 
-        # Cell-averaged velocity magnitude
-        u_cell = 0.5 * np.abs(state.u[:-1] + state.u[1:])
+        # Use maximum face velocity magnitude for each cell
+        # This correctly handles moving boundaries (e.g., supersonic piston)
+        u_left = np.abs(state.u[:-1])
+        u_right = np.abs(state.u[1:])
+        u_max = np.maximum(u_left, u_right)
 
-        # Wave speed
-        wave_speed = u_cell + c
+        # Wave speed includes maximum velocity at cell faces
+        wave_speed = u_max + c
 
         # Local time step limit
         dt_local = dx / np.maximum(wave_speed, 1e-10)
