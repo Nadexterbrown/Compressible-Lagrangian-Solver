@@ -36,6 +36,12 @@ from lagrangian_solver.numerics.time_integration import (
     SSPRK3Integrator,
     TimeStepInfo,
 )
+from lagrangian_solver.numerics.adaptive import (
+    AdaptiveMesh,
+    AdaptiveConfig,
+    AdaptiveStats,
+    create_adaptive_mesh,
+)
 from lagrangian_solver.boundary.base import BoundaryCondition, BoundaryFlux
 from lagrangian_solver.io.output import OutputWriter, OutputFrame, create_writer
 
@@ -50,9 +56,6 @@ class SolverConfig:
         t_end: Final simulation time [s]
         dt_output: Time interval between output writes [s]
         dt_max: Maximum time step [s] (None for no limit)
-        dt_min: Minimum time step floor [s] (None for no floor)
-                When set, clips time step to this minimum value.
-                WARNING: May cause stability issues if set too large.
         verbose: Print progress messages
     """
 
@@ -60,7 +63,6 @@ class SolverConfig:
     t_end: float = 1.0
     dt_output: float = 0.1
     dt_max: Optional[float] = None
-    dt_min: Optional[float] = None
     verbose: bool = True
 
 
@@ -78,6 +80,12 @@ class SolverStatistics:
         avg_dt: Average time step [s]
         mass_error: Final relative mass conservation error
         energy_change: Relative change in total energy
+        cells_initial: Initial number of cells
+        cells_final: Final number of cells
+        total_splits: Total cell splits performed
+        total_merges: Total cell merges performed
+        max_refine_level: Maximum refinement level reached
+        min_refine_level: Minimum refinement level (most coarsened)
     """
 
     n_steps: int = 0
@@ -88,6 +96,12 @@ class SolverStatistics:
     avg_dt: float = 0.0
     mass_error: float = 0.0
     energy_change: float = 0.0
+    cells_initial: int = 0
+    cells_final: int = 0
+    total_splits: int = 0
+    total_merges: int = 0
+    max_refine_level: int = 0
+    min_refine_level: int = 0
 
 
 class LagrangianSolver:
@@ -114,6 +128,7 @@ class LagrangianSolver:
         bc_left: Optional[BoundaryCondition] = None,
         bc_right: Optional[BoundaryCondition] = None,
         config: Optional[SolverConfig] = None,
+        adaptive_config: Optional[AdaptiveConfig] = None,
     ):
         """
         Initialize the Lagrangian solver.
@@ -126,6 +141,7 @@ class LagrangianSolver:
             bc_left: Left boundary condition (default: reflective)
             bc_right: Right boundary condition (default: reflective)
             config: Solver configuration
+            adaptive_config: Adaptive mesh configuration (None to disable)
         """
         self._grid = grid
         self._eos = eos
@@ -150,6 +166,13 @@ class LagrangianSolver:
         # Boundary conditions
         self._bc_left = bc_left
         self._bc_right = bc_right
+
+        # Adaptive mesh refinement
+        self._adaptive_config = adaptive_config
+        if adaptive_config is not None and adaptive_config.enabled:
+            self._adaptive_mesh = create_adaptive_mesh(adaptive_config, eos)
+        else:
+            self._adaptive_mesh: Optional[AdaptiveMesh] = None
 
         # State
         self._state: Optional[FlowState] = None
@@ -208,6 +231,10 @@ class LagrangianSolver:
         self._grid.initialize_mass(state.rho)
         self._time = 0.0
         self._step = 0
+
+        # Initialize adaptive mesh cell levels
+        if self._adaptive_mesh is not None:
+            self._adaptive_mesh.initialize_levels(state.n_cells)
 
     def set_riemann_ic(
         self,
@@ -315,10 +342,15 @@ class LagrangianSolver:
             dt = min(dt, self._config.dt_max)
             ts_info.dt = dt
 
-        # Apply minimum time step floor (if set)
-        # WARNING: This may cause stability issues if dt_min is too large
-        if self._config.dt_min is not None:
-            dt = max(dt, self._config.dt_min)
+        # Apply dt_floor if enabled (clips time step to minimum value)
+        # This sacrifices accuracy but ensures simulation progress
+        if (
+            self._adaptive_config is not None
+            and self._adaptive_config.dt_floor_enabled
+            and self._adaptive_config.dt_floor is not None
+            and dt < self._adaptive_config.dt_floor
+        ):
+            dt = self._adaptive_config.dt_floor
             ts_info.dt = dt
 
         # Don't exceed final time
@@ -337,6 +369,21 @@ class LagrangianSolver:
         # Update time and step counter
         self._time += dt
         self._step += 1
+
+        # Apply adaptive mesh refinement
+        if self._adaptive_mesh is not None:
+            self._state, self._grid, adapt_stats = self._adaptive_mesh.adapt(
+                self._state, self._grid, self._step, current_dt=dt
+            )
+            self._stats.total_splits += adapt_stats.cells_split
+            self._stats.total_merges += adapt_stats.cells_merged
+            # Track refinement level extremes
+            self._stats.max_refine_level = max(
+                self._stats.max_refine_level, adapt_stats.max_level
+            )
+            self._stats.min_refine_level = min(
+                self._stats.min_refine_level, adapt_stats.min_level
+            )
 
         # Update statistics
         self._stats.min_dt = min(self._stats.min_dt, dt)
@@ -366,6 +413,7 @@ class LagrangianSolver:
 
         # Record initial state
         initial_energy = compute_total_energy(self._state)
+        self._stats.cells_initial = self._state.n_cells
         t_next_output = 0.0
 
         # Start timing
@@ -414,6 +462,7 @@ class LagrangianSolver:
         self._stats.final_time = self._time
         self._stats.avg_dt = self._time / max(self._step, 1)
         self._stats.mass_error = compute_mass_error(self._state, self._grid)
+        self._stats.cells_final = self._state.n_cells
 
         final_energy = compute_total_energy(self._state)
         if abs(initial_energy) > 1e-15:
@@ -439,6 +488,15 @@ class LagrangianSolver:
         print(f"Avg dt:           {self._stats.avg_dt:.6e} s")
         print(f"Mass error:       {self._stats.mass_error:.6e}")
         print(f"Energy change:    {self._stats.energy_change:.6e}")
+        if self._adaptive_mesh is not None:
+            print("-" * 60)
+            print("ADAPTIVE MESH")
+            print(f"Initial cells:    {self._stats.cells_initial}")
+            print(f"Final cells:      {self._stats.cells_final}")
+            print(f"Total splits:     {self._stats.total_splits}")
+            print(f"Total merges:     {self._stats.total_merges}")
+            print(f"Max refine level: {self._stats.max_refine_level}")
+            print(f"Min refine level: {self._stats.min_refine_level}")
         print("=" * 60)
 
 

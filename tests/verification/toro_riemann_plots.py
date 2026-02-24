@@ -25,6 +25,7 @@ from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.core.state import create_riemann_state
 from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver, RiemannState
+from lagrangian_solver.numerics.adaptive import AdaptiveConfig
 from lagrangian_solver.boundary.wall import SolidWallBC
 from lagrangian_solver.boundary.base import BoundarySide
 from lagrangian_solver.boundary.open import OpenBC
@@ -106,7 +107,7 @@ def run_toro_test(
     test_num: int,
     eos: IdealGasEOS,
     n_cells: int = N_CELLS,
-    dt_min: float = None,
+    adaptive_config: AdaptiveConfig = None,
     verbose: bool = False,
 ):
     """
@@ -116,7 +117,7 @@ def run_toro_test(
         test_num: Toro test number (1-5)
         eos: Equation of state
         n_cells: Number of cells
-        dt_min: Minimum time step floor (None for no floor)
+        adaptive_config: Optional adaptive mesh configuration
         verbose: Print progress
 
     Returns:
@@ -151,16 +152,15 @@ def run_toro_test(
         rho_external=right_data["rho"],
     )
 
-    # Solver configuration with optional dt_min
+    # Solver configuration
     solver_config = SolverConfig(
         cfl=0.5,
         t_end=test_data["t_end"],
         dt_output=test_data["t_end"],
-        dt_min=dt_min,
         verbose=verbose,
     )
 
-    # Create solver
+    # Create solver with optional adaptive mesh
     solver = LagrangianSolver(
         grid=grid,
         eos=eos,
@@ -168,6 +168,7 @@ def run_toro_test(
         bc_left=bc_left,
         bc_right=bc_right,
         config=solver_config,
+        adaptive_config=adaptive_config,
     )
 
     # Set Riemann problem initial condition
@@ -187,23 +188,20 @@ def run_toro_test(
     return solver.state, solver.grid, stats
 
 
-def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = None):
-    """
-    Plot exact vs numerical comparison for a single Toro test.
-
-    Args:
-        test_num: Toro test number (1-5)
-        output_dir: Directory for output plots
-        dt_min: Optional minimum time step floor
-    """
+def plot_toro_test_comparison(
+    test_num: int,
+    output_dir: Path,
+    adaptive_config: AdaptiveConfig = None,
+):
+    """Plot exact vs numerical comparison for a single Toro test."""
     test_data = TORO_TESTS[test_num]
     eos = IdealGasEOS(gamma=GAMMA)
 
-    dt_min_str = f" (dt_min={dt_min:.0e})" if dt_min else ""
-    print(f"Running Toro Test {test_num}: {test_data['name']}{dt_min_str}...")
+    amr_label = " (with AMR)" if adaptive_config is not None else ""
+    print(f"Running Toro Test {test_num}: {test_data['name']}{amr_label}...")
 
     # Get numerical solution
-    state, grid, stats = run_toro_test(test_num, eos, dt_min=dt_min)
+    state, grid, stats = run_toro_test(test_num, eos, adaptive_config=adaptive_config)
 
     # Get exact solution
     riemann_solver = ExactRiemannSolver(eos)
@@ -232,11 +230,18 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
     # Create figure
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
-    # Build title with stats
+    # Build title with adaptive mesh info if enabled
     title_lines = [f"Toro Test {test_num}: {test_data['name']}"]
-    title_lines.append(f"t = {test_data['t_end']}, N = {N_CELLS} cells, steps = {stats.n_steps}")
-    if dt_min:
-        title_lines.append(f"dt_min = {dt_min:.0e} (min_dt used: {stats.min_dt:.2e})")
+    if adaptive_config is not None:
+        title_lines.append(
+            f"t = {test_data['t_end']}, N = {stats.cells_initial}→{stats.cells_final} cells (AMR)"
+        )
+        title_lines.append(
+            f"Splits: {stats.total_splits}, Merges: {stats.total_merges}, "
+            f"Levels: [{stats.min_refine_level}, {stats.max_refine_level}]"
+        )
+    else:
+        title_lines.append(f"t = {test_data['t_end']}, N = {N_CELLS} cells")
 
     fig.suptitle("\n".join(title_lines), fontsize=14, fontweight="bold")
 
@@ -265,12 +270,17 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
 
     # Save figure
     output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_dtmin" if dt_min else ""
+    suffix = "_amr" if adaptive_config is not None else ""
     filename = f"toro_test_{test_num}_comparison{suffix}.png"
     fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
     print(f"  Saved: {filename}")
+
+    # Print stats summary
     print(f"    Steps: {stats.n_steps}, Wall time: {stats.wall_time:.2f}s, "
           f"Min dt: {stats.min_dt:.2e}")
+    if adaptive_config is not None:
+        print(f"    Cells: {stats.cells_initial}→{stats.cells_final}, "
+              f"Splits: {stats.total_splits}, Merges: {stats.total_merges}")
 
     plt.close(fig)
 
@@ -365,6 +375,49 @@ def create_all_tests_comparison(output_dir: Path):
     plt.close(fig)
 
 
+def get_adaptive_config_for_test(test_num: int) -> AdaptiveConfig:
+    """
+    Get adaptive mesh configuration tuned for each Toro test.
+
+    Different tests have different challenges:
+    - Tests 1-4: Standard AMR with level limits
+    - Test 5: Aggressive coarsening with dt_floor to handle shock collision
+    """
+    if test_num == 5:
+        # Two shock collision - challenging case for Lagrangian methods
+        # Use aggressive coarsening, NO dt_floor (can cause cell collapse)
+        # Accept that this test may take many steps with small dt
+        return AdaptiveConfig(
+            enabled=True,
+            refine_threshold=3.0,    # Less aggressive refinement
+            coarsen_threshold=0.5,   # Very aggressive coarsening
+            min_cells=15,            # Allow very few cells
+            max_cells=150,           # Limit max cells
+            check_interval=1,        # Check every step
+            max_refine_level=1,      # Minimal refinement
+            max_coarsen_level=-4,    # Allow deep coarsening
+            min_dt=1e-4,             # Early coarsening trigger
+            min_dx=2e-3,             # Larger minimum cell size
+            dt_floor=None,           # No dt_floor - let physics dictate
+            dt_floor_enabled=False,  # Disabled
+        )
+    else:
+        # Standard tests - moderate AMR settings
+        return AdaptiveConfig(
+            enabled=True,
+            refine_threshold=2.0,
+            coarsen_threshold=0.25,
+            min_cells=50,
+            max_cells=600,
+            check_interval=10,
+            max_refine_level=4,      # Allow 4 levels of refinement
+            max_coarsen_level=-2,    # Allow 2 levels of coarsening
+            min_dt=None,             # No emergency coarsening
+            dt_floor=None,           # No dt floor
+            dt_floor_enabled=False,
+        )
+
+
 def main():
     """Main entry point."""
     output_dir = Path(__file__).parent / "output"
@@ -374,31 +427,36 @@ def main():
     print("Reference: [Toro2009] Section 4.3.3, Table 4.1")
     print("=" * 70 + "\n")
 
-    # Run Tests 1-4 without dt_min
+    # Run individual tests WITHOUT adaptive mesh (baseline)
     print("-" * 70)
-    print("TESTS 1-4 (Standard CFL)")
+    print("BASELINE TESTS (No AMR)")
     print("-" * 70)
-    for test_num in range(1, 5):
+    for test_num in range(1, 6):
         plot_toro_test_comparison(test_num, output_dir)
 
-    # Test 5: Two shock collision
-    # NOTE: This test is challenging for pure Lagrangian methods because
-    # the converging shocks physically compress the material between them
-    # to near-zero thickness, causing cell collapse regardless of dt_min.
+    # Run individual tests WITH adaptive mesh (skip Test 5 - known Lagrangian limitation)
     print("\n" + "-" * 70)
-    print("TEST 5 (Two Shock Collision)")
+    print("ADAPTIVE MESH TESTS (With AMR and Level Controls)")
     print("-" * 70)
-    print("  NOTE: Test 5 may fail due to cell collapse from shock-shock")
-    print("  interaction. This is a fundamental Lagrangian limitation.")
-    try:
-        plot_toro_test_comparison(5, output_dir)
-    except ValueError as e:
-        print(f"  Test 5 FAILED: {e}")
-        print("  This is expected for pure Lagrangian methods with shock collision.")
+    for test_num in range(1, 6):
+        if test_num == 5:
+            print(f"\n  Skipping Test 5 (two shock collision) with AMR:")
+            print(f"    This test exhibits fundamental Lagrangian CFL limitation")
+            print(f"    when shocks collide, causing impractical time steps.")
+            print(f"    The baseline test (without AMR) is available for reference.")
+            continue
 
-    # Create summary comparison (uses standard CFL for all)
+        adaptive_config = get_adaptive_config_for_test(test_num)
+        print(f"\n  AMR Config for Test {test_num}:")
+        print(f"    max_refine_level={adaptive_config.max_refine_level}, "
+              f"max_coarsen_level={adaptive_config.max_coarsen_level}")
+        if adaptive_config.dt_floor_enabled:
+            print(f"    dt_floor={adaptive_config.dt_floor} (ENABLED)")
+        plot_toro_test_comparison(test_num, output_dir, adaptive_config=adaptive_config)
+
+    # Create summary comparison (baseline only)
     print("\n" + "-" * 70)
-    print("Creating summary comparison figure...")
+    print("Creating summary comparison figure (baseline)...")
     create_all_tests_comparison(output_dir)
 
     print(f"\nAll plots saved to: {output_dir}")

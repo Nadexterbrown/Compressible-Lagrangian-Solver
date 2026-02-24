@@ -1,4 +1,4 @@
-"""Numerics module containing Riemann solvers and time integration schemes."""
+"""Numerics module containing Riemann solvers, time integration, and adaptive mesh."""
 
 from lagrangian_solver.numerics.riemann import (
     RiemannState,
@@ -8,6 +8,12 @@ from lagrangian_solver.numerics.riemann import (
     HLLCRiemannSolver,
 )
 from lagrangian_solver.numerics.time_integration import HeunIntegrator
+from lagrangian_solver.numerics.adaptive import (
+    AdaptiveConfig,
+    AdaptiveStats,
+    AdaptiveMesh,
+    create_adaptive_mesh,
+)
 
 __all__ = [
     "RiemannState",
@@ -16,4 +22,8 @@ __all__ = [
     "ExactRiemannSolver",
     "HLLCRiemannSolver",
     "HeunIntegrator",
+    "AdaptiveConfig",
+    "AdaptiveStats",
+    "AdaptiveMesh",
+    "create_adaptive_mesh",
 ]

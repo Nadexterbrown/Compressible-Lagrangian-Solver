@@ -214,21 +214,25 @@ class LagrangianGrid:
         Set face positions directly.
 
         Used during time integration to update grid positions.
+        Note: For resizing the grid (changing number of cells), use resize() instead.
 
         Args:
             x: New face positions [m]
 
         Raises:
             ValueError: If positions are not monotonically increasing
+            ValueError: If array size doesn't match current grid size
         """
-        if len(x) != self._n_faces:
-            raise ValueError(
-                f"x must have length n_faces={self._n_faces}, got {len(x)}"
-            )
-
         # Check monotonicity
         if np.any(np.diff(x) <= 0):
             raise ValueError("Face positions must be strictly increasing")
+
+        # Require exact size match - use resize() for changing cell count
+        if len(x) != self._n_faces:
+            raise ValueError(
+                f"Position array size {len(x)} doesn't match grid size {self._n_faces}. "
+                f"Use grid.resize() to change the number of cells."
+            )
 
         self._x[:] = x
 
@@ -361,3 +365,56 @@ class LagrangianGrid:
         grid._mass_initialized = True
 
         return grid
+
+    def copy(self) -> "LagrangianGrid":
+        """
+        Create a deep copy of the grid.
+
+        Returns:
+            New LagrangianGrid with copied data
+        """
+        config = GridConfig(
+            n_cells=self._n_cells,
+            x_min=self._x[0],
+            x_max=self._x[-1],
+        )
+
+        new_grid = LagrangianGrid(config)
+        new_grid._x = self._x.copy()
+        new_grid._m = self._m.copy()
+        new_grid._dm = self._dm.copy()
+        new_grid._mass_initialized = self._mass_initialized
+
+        return new_grid
+
+    def resize(self, n_cells: int, x: np.ndarray, m: np.ndarray):
+        """
+        Resize the grid to a new number of cells.
+
+        Used by adaptive mesh refinement when splitting/merging cells.
+
+        Args:
+            n_cells: New number of cells
+            x: New face positions [m] (length n_cells + 1)
+            m: New cumulative mass at faces [kg] (length n_cells + 1)
+        """
+        n_faces = n_cells + 1
+
+        if len(x) != n_faces:
+            raise ValueError(f"x must have length {n_faces}, got {len(x)}")
+        if len(m) != n_faces:
+            raise ValueError(f"m must have length {n_faces}, got {len(m)}")
+
+        self._n_cells = n_cells
+        self._n_faces = n_faces
+        self._x = x.copy()
+        self._m = m.copy()
+        self._dm = np.diff(m)
+        self._mass_initialized = True
+
+        # Verify consistency
+        if len(self._dm) != self._n_cells:
+            raise RuntimeError(
+                f"dm array size mismatch after resize: "
+                f"len(dm)={len(self._dm)}, n_cells={self._n_cells}"
+            )

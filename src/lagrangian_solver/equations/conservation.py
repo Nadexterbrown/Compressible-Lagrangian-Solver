@@ -171,6 +171,14 @@ class LagrangianConservation:
         n_cells = state.n_cells
         dm = grid.dm
 
+        # Verify consistency between state and grid
+        if len(dm) != n_cells:
+            raise RuntimeError(
+                f"State/grid mismatch in compute_residual: "
+                f"state.n_cells={n_cells}, len(grid.dm)={len(dm)}, "
+                f"grid.n_cells={grid.n_cells}"
+            )
+
         # Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
         d_tau = np.zeros(n_cells)
         for i in range(n_cells):
