@@ -50,6 +50,9 @@ class SolverConfig:
         t_end: Final simulation time [s]
         dt_output: Time interval between output writes [s]
         dt_max: Maximum time step [s] (None for no limit)
+        dt_min: Minimum time step floor [s] (None for no floor)
+                When set, clips time step to this minimum value.
+                WARNING: May cause stability issues if set too large.
         verbose: Print progress messages
     """
 
@@ -57,6 +60,7 @@ class SolverConfig:
     t_end: float = 1.0
     dt_output: float = 0.1
     dt_max: Optional[float] = None
+    dt_min: Optional[float] = None
     verbose: bool = True
 
 
@@ -309,6 +313,12 @@ class LagrangianSolver:
         # Apply maximum time step limit
         if self._config.dt_max is not None:
             dt = min(dt, self._config.dt_max)
+            ts_info.dt = dt
+
+        # Apply minimum time step floor (if set)
+        # WARNING: This may cause stability issues if dt_min is too large
+        if self._config.dt_min is not None:
+            dt = max(dt, self._config.dt_min)
             ts_info.dt = dt
 
         # Don't exceed final time
