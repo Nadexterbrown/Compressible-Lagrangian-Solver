@@ -36,6 +36,10 @@ from lagrangian_solver.numerics.time_integration import (
     SSPRK3Integrator,
     TimeStepInfo,
 )
+from lagrangian_solver.numerics.artificial_viscosity import (
+    ArtificialViscosity,
+    ArtificialViscosityConfig,
+)
 from lagrangian_solver.boundary.base import BoundaryCondition, BoundaryFlux
 from lagrangian_solver.io.output import OutputWriter, OutputFrame, create_writer
 
@@ -54,6 +58,9 @@ class SolverConfig:
                 When set, clips time step to this minimum value.
                 WARNING: May cause stability issues if set too large.
         verbose: Print progress messages
+        artificial_viscosity: Configuration for artificial viscosity (None to disable)
+                              Enables shock capturing and wall heating correction.
+                              Reference: [Noh2001], [VonNeumannRichtmyer1950]
     """
 
     cfl: float = 0.5
@@ -62,6 +69,7 @@ class SolverConfig:
     dt_max: Optional[float] = None
     dt_min: Optional[float] = None
     verbose: bool = True
+    artificial_viscosity: Optional[ArtificialViscosityConfig] = None
 
 
 @dataclass
@@ -144,8 +152,18 @@ class LagrangianSolver:
             self._integrator = time_integrator
             self._integrator.cfl = self._config.cfl
 
-        # Set up conservation law handler
-        self._conservation = LagrangianConservation(eos, self._riemann_solver)
+        # Set up artificial viscosity if configured
+        if self._config.artificial_viscosity is not None:
+            self._artificial_viscosity = ArtificialViscosity(
+                self._config.artificial_viscosity
+            )
+        else:
+            self._artificial_viscosity = None
+
+        # Set up conservation law handler (with artificial viscosity if enabled)
+        self._conservation = LagrangianConservation(
+            eos, self._riemann_solver, self._artificial_viscosity
+        )
 
         # Boundary conditions
         self._bc_left = bc_left
@@ -196,6 +214,11 @@ class LagrangianSolver:
     def statistics(self) -> SolverStatistics:
         """Solver statistics."""
         return self._stats
+
+    @property
+    def artificial_viscosity(self) -> Optional[ArtificialViscosity]:
+        """Artificial viscosity calculator (None if disabled)."""
+        return self._artificial_viscosity
 
     def set_initial_condition(self, state: FlowState) -> None:
         """
@@ -446,6 +469,11 @@ class LagrangianSolver:
         print(f"Avg dt:           {self._stats.avg_dt:.6e} s")
         print(f"Mass error:       {self._stats.mass_error:.6e}")
         print(f"Energy change:    {self._stats.energy_change:.6e}")
+        if self._artificial_viscosity is not None:
+            av_cfg = self._artificial_viscosity.config
+            print(f"Artificial visc:  c_Q={av_cfg.c_quad}, c_L={av_cfg.c_lin}, c_H={av_cfg.c_heat}")
+        else:
+            print(f"Artificial visc:  disabled")
         print("=" * 60)
 
 

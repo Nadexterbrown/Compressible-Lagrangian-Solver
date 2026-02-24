@@ -2,22 +2,24 @@
 Lagrangian conservation laws and flux computations.
 
 This module implements the 1D compressible Euler equations in Lagrangian
-(mass) coordinates.
+(mass) coordinates, with optional artificial viscosity for shock capturing.
 
 References:
     [Despres2017] Chapter 3 - Lagrangian formulation
     [Toro2009] Chapter 1 - Euler equations
+    [Toro2009] Chapter 11 - Artificial viscosity methods
+    [Noh2001] Noh, W.F. "Revisiting Wall Heating" J. Comput. Physics (2001)
 
 Governing Equations in Lagrangian Mass Coordinates (m, t):
 
     Mass Conservation (specific volume):
         ∂τ/∂t - ∂u/∂m = 0
 
-    Momentum Conservation:
-        ∂u/∂t + ∂p/∂m = 0
+    Momentum Conservation (with artificial viscosity Q):
+        ∂u/∂t + ∂(p + Q)/∂m = 0
 
-    Energy Conservation:
-        ∂E/∂t + ∂(pu)/∂m = 0
+    Energy Conservation (with artificial heat q):
+        ∂E/∂t + ∂(pu)/∂m = ∂q/∂m
 
     Position Update:
         ∂x/∂t = u
@@ -27,11 +29,13 @@ where:
     u is velocity [m/s]
     E = e + ½u² is total specific energy [J/kg]
     p is pressure [Pa]
+    Q is artificial viscous stress [Pa]
+    q is artificial heat flux [W/m²]
     m is mass coordinate [kg]
 """
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional
 import numpy as np
 
 from lagrangian_solver.core.state import FlowState, ConservedVariables
@@ -40,6 +44,10 @@ from lagrangian_solver.equations.eos import EOSBase
 from lagrangian_solver.numerics.riemann import (
     RiemannSolverBase,
     RiemannState,
+)
+from lagrangian_solver.numerics.artificial_viscosity import (
+    ArtificialViscosity,
+    ArtificialViscosityConfig,
 )
 
 
@@ -68,24 +76,35 @@ class LagrangianConservation:
     The semi-discrete form of the equations is:
 
         dτ_i/dt = (u_{i+1} - u_i) / dm_i
-        du_i/dt = -(p_{i+1} - p_i) / dm_i   (face-centered)
-        dE_i/dt = -(p_{i+1}u_{i+1} - p_i u_i) / dm_i
+        du_i/dt = -(p_{i+1} + Q_{i+1} - p_i - Q_i) / dm_i   (face-centered)
+        dE_i/dt = -(p_{i+1}u_{i+1} - p_i u_i) / dm_i + (q_{i+1} - q_i) / dm_i
 
-    where i is the cell index and face i is at the left of cell i.
+    where i is the cell index, face i is at the left of cell i, Q is
+    artificial viscous stress, and q is artificial heat flux.
 
-    Reference: [Despres2017] Section 3.4
+    Reference:
+        [Despres2017] Section 3.4
+        [Toro2009] Section 11.3 - Artificial viscosity
+        [Noh2001] - Artificial heat conduction
     """
 
-    def __init__(self, eos: EOSBase, riemann_solver: RiemannSolverBase):
+    def __init__(
+        self,
+        eos: EOSBase,
+        riemann_solver: RiemannSolverBase,
+        artificial_viscosity: Optional[ArtificialViscosity] = None,
+    ):
         """
         Initialize conservation law solver.
 
         Args:
             eos: Equation of state
             riemann_solver: Riemann solver for computing interface fluxes
+            artificial_viscosity: Artificial viscosity calculator (optional)
         """
         self._eos = eos
         self._riemann_solver = riemann_solver
+        self._artificial_viscosity = artificial_viscosity
 
     @property
     def eos(self) -> EOSBase:
@@ -96,6 +115,16 @@ class LagrangianConservation:
     def riemann_solver(self) -> RiemannSolverBase:
         """Riemann solver for interface flux computation."""
         return self._riemann_solver
+
+    @property
+    def artificial_viscosity(self) -> Optional[ArtificialViscosity]:
+        """Artificial viscosity calculator."""
+        return self._artificial_viscosity
+
+    @artificial_viscosity.setter
+    def artificial_viscosity(self, av: Optional[ArtificialViscosity]) -> None:
+        """Set artificial viscosity calculator."""
+        self._artificial_viscosity = av
 
     def compute_fluxes(
         self, state: FlowState, grid: LagrangianGrid
@@ -158,7 +187,16 @@ class LagrangianConservation:
         Returns the time derivatives:
             dτ/dt, du/dt, dE/dt, dx/dt
 
-        Reference: [Despres2017] Equations (3.15)-(3.17)
+        With artificial viscosity Q and heat flux q:
+            dτ/dt = (u_{i+1} - u_i) / dm_i
+            du/dt = -((p_i + Q_i) - (p_{i-1} + Q_{i-1})) / dm_face
+            dE/dt = -(pu_{i+1} - pu_i) / dm_i + (q_{i+1} - q_i) / dm_i
+            dx/dt = u
+
+        Reference:
+            [Despres2017] Equations (3.15)-(3.17)
+            [Toro2009] Section 11.3 - Artificial viscosity
+            [Noh2001] - Artificial heat conduction for wall heating
 
         Args:
             state: Current flow state
@@ -171,23 +209,40 @@ class LagrangianConservation:
         n_cells = state.n_cells
         dm = grid.dm
 
+        # Compute artificial viscosity if enabled
+        if self._artificial_viscosity is not None and self._artificial_viscosity.enabled:
+            Q = self._artificial_viscosity.compute_viscous_stress(state, grid)
+            q_heat = self._artificial_viscosity.compute_artificial_heat(state, grid)
+        else:
+            Q = np.zeros(n_cells)
+            q_heat = np.zeros(state.n_faces)
+
         # Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
         d_tau = np.zeros(n_cells)
         for i in range(n_cells):
             d_tau[i] = (fluxes.u_flux[i + 1] - fluxes.u_flux[i]) / dm[i]
 
-        # Velocity rate at faces: du/dt = -(p_i - p_{i-1}) / dm_face
-        # Uses cell-centered pressures, not face pressures
+        # Velocity rate at faces: du/dt = -((p_i + Q_i) - (p_{i-1} + Q_{i-1})) / dm_face
+        # Uses cell-centered pressures plus artificial viscous stress
         # For boundary faces, this is handled by boundary conditions
+        # Reference: [Toro2009] Equation (11.20)
         d_u = np.zeros(state.n_faces)
         for i in range(1, n_cells):
             dm_avg = 0.5 * (dm[i - 1] + dm[i])
-            d_u[i] = -(state.p[i] - state.p[i - 1]) / dm_avg
+            # Total stress: pressure + artificial viscosity
+            stress_i = state.p[i] + Q[i]
+            stress_im1 = state.p[i - 1] + Q[i - 1]
+            d_u[i] = -(stress_i - stress_im1) / dm_avg
 
-        # Energy rate: dE/dt = -(pu_{i+1} - pu_i) / dm_i
+        # Energy rate: dE/dt = -(pu_{i+1} - pu_i) / dm_i + (q_{i+1} - q_i) / dm_i
+        # The artificial heat conduction term redistributes heat (Noh's fix)
+        # Reference: [Noh2001] Section 5
         d_E = np.zeros(n_cells)
         for i in range(n_cells):
+            # Inviscid energy flux
             d_E[i] = -(fluxes.pu_flux[i + 1] - fluxes.pu_flux[i]) / dm[i]
+            # Artificial heat conduction (Noh's wall heating fix)
+            d_E[i] += (q_heat[i + 1] - q_heat[i]) / dm[i]
 
         # Position rate: dx/dt = u
         d_x = fluxes.u_flux.copy()

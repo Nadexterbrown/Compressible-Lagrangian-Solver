@@ -30,12 +30,13 @@ from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
 from lagrangian_solver.core.state import create_uniform_state
 from lagrangian_solver.equations.eos import CanteraEOS
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver
+from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosityConfig
 from lagrangian_solver.boundary.piston import MovingPistonBC
 from lagrangian_solver.boundary.open import OpenBC
 from lagrangian_solver.boundary.base import BoundarySide
 
 # Grid parameters
-N_CELLS = 100
+N_CELLS = 500
 DOMAIN_LENGTH = 5.0  # meters
 
 # STP conditions for air
@@ -179,6 +180,7 @@ def exact_piston_solution(
     gamma: float,
     rho1: float,
     p1: float,
+    R: float = 287.05,
 ) -> tuple:
     """
     Compute exact solution for piston-driven shock at time t.
@@ -193,11 +195,13 @@ def exact_piston_solution(
         gamma: Ratio of specific heats
         rho1: Initial density [kg/m³]
         p1: Initial pressure [Pa]
+        R: Specific gas constant [J/(kg·K)]
 
     Returns:
-        (rho, u, p, e) arrays at positions x
+        (rho, u, p, e, T, s, x_piston, x_shock) arrays at positions x
     """
     c1 = np.sqrt(gamma * p1 / rho1)
+    cv = R / (gamma - 1)
 
     # Compute shock and piston speeds
     D = compute_shock_speed(M_s, gamma, c1)
@@ -221,10 +225,19 @@ def exact_piston_solution(
     u[post_shock] = u2
     p[post_shock] = p2
 
-    # Internal energy
+    # Internal energy: e = p / (rho * (gamma - 1))
     e = p / (rho * (gamma - 1))
 
-    return rho, u, p, e, x_piston, x_shock
+    # Temperature: T = p / (rho * R)
+    T = p / (rho * R)
+
+    # Entropy: s = cv * ln(T/T_ref) - R * ln(rho/rho_ref)
+    # Using reference state T_ref = 300 K, rho_ref = 1.0 kg/m³
+    T_ref = 300.0
+    rho_ref = 1.0
+    s = cv * np.log(T / T_ref) - R * np.log(rho / rho_ref)
+
+    return rho, u, p, e, T, s, x_piston, x_shock
 
 
 # Test configurations (keyed by shock Mach number)
@@ -263,6 +276,8 @@ def run_piston_test(
     c_init: float,
     n_cells: int = N_CELLS,
     dt_min: float = None,
+    use_av: bool = True,
+    av_config: ArtificialViscosityConfig = None,
 ):
     """
     Run a piston shock test and return numerical solution.
@@ -275,6 +290,8 @@ def run_piston_test(
         c_init: Initial sound speed [m/s]
         n_cells: Number of cells
         dt_min: Minimum time step floor
+        use_av: Whether to enable artificial viscosity (default: True)
+        av_config: Custom artificial viscosity config (uses defaults if None)
 
     Returns:
         Tuple of (state, grid, stats, failed, error_msg)
@@ -315,6 +332,20 @@ def run_piston_test(
         rho_external=rho_init,
     )
 
+    # Set up artificial viscosity if enabled
+    # Uses Von Neumann-Richtmyer + Landshoff + Noh's heat conduction
+    # Reference: [Noh2001], [Margolin2022]
+    if use_av:
+        if av_config is None:
+            av_config = ArtificialViscosityConfig(
+                c_quad=2.0,   # Quadratic coefficient (shock capturing)
+                c_lin=0.5,    # Linear coefficient (oscillation damping)
+                c_heat=0.1,   # Heat conduction (wall heating fix)
+                enabled=True,
+            )
+    else:
+        av_config = None
+
     # Solver configuration
     solver_config = SolverConfig(
         cfl=0.5,
@@ -322,6 +353,7 @@ def run_piston_test(
         dt_output=t_end,
         dt_min=dt_min,
         verbose=False,
+        artificial_viscosity=av_config,
     )
 
     # Create solver
@@ -379,6 +411,7 @@ def plot_piston_test(
     gamma: float,
     c_init: float,
     dt_min: float = None,
+    use_av: bool = True,
 ):
     """
     Plot exact vs numerical comparison for a piston shock test.
@@ -391,17 +424,19 @@ def plot_piston_test(
         gamma: Ratio of specific heats
         c_init: Initial sound speed [m/s]
         dt_min: Optional minimum time step floor
+        use_av: Whether to enable artificial viscosity (default: True)
     """
     test_data = PISTON_TESTS[test_num]
     M_s = test_data["M_s"]
     t_end = test_data["t_end"]
 
     dt_min_str = f" (dt_min={dt_min:.0e})" if dt_min else ""
-    print(f"Running Piston Test M={test_num}: {test_data['name']}{dt_min_str}...")
+    av_str = " [AV enabled]" if use_av else " [no AV]"
+    print(f"Running Piston Test M={test_num}: {test_data['name']}{dt_min_str}{av_str}...")
 
     # Get numerical solution
     state, grid, stats, failed, error_msg = run_piston_test(
-        test_num, eos, rho_init, gamma, c_init, dt_min=dt_min
+        test_num, eos, rho_init, gamma, c_init, dt_min=dt_min, use_av=use_av
     )
 
     if failed:
@@ -411,10 +446,14 @@ def plot_piston_test(
     else:
         t_plot = t_end
 
+    # Get gas constant from EOS (for air)
+    eos.set_state_TP(T_STP, P_STP)
+    R_gas = P_STP / (rho_init * T_STP)  # R = p / (rho * T)
+
     # Compute exact solution
     x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
-    rho_exact, u_exact, p_exact, e_exact, x_piston, x_shock = exact_piston_solution(
-        x_exact, t_plot, 0.0, M_s, gamma, rho_init, P_STP
+    rho_exact, u_exact, p_exact, e_exact, T_exact, s_exact, x_piston, x_shock = exact_piston_solution(
+        x_exact, t_plot, 0.0, M_s, gamma, rho_init, P_STP, R=R_gas
     )
 
     # Numerical solution
@@ -423,9 +462,11 @@ def plot_piston_test(
     u_num = 0.5 * (state.u[:-1] + state.u[1:])
     p_num = state.p
     e_num = state.e
+    T_num = state.T
+    s_num = state.s
 
-    # Create figure
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    # Create figure with 2x3 grid
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
     # Build title
     P = compute_pressure_ratio(M_s, gamma)
@@ -433,7 +474,8 @@ def plot_piston_test(
     D = compute_shock_speed(M_s, gamma, c_init)
 
     status_str = "FAILED" if failed else ""
-    title_lines = [f"Piston Shock Test: M_s = {test_num} ({test_data['name']}) {status_str}"]
+    av_status = "AV ON" if use_av else "AV OFF"
+    title_lines = [f"Piston Shock Test: M_s = {test_num} ({test_data['name']}) [{av_status}] {status_str}"]
     title_lines.append(f"Air at STP, t = {t_plot*1e3:.3f} ms, N = {N_CELLS} cells, steps = {stats.n_steps}")
     title_lines.append(f"P = {P:.2f}, u_piston = {u_p:.1f} m/s, D_shock = {D:.1f} m/s")
 
@@ -446,16 +488,18 @@ def plot_piston_test(
 
     fig.suptitle("\n".join(title_lines), fontsize=12, fontweight="bold")
 
-    # Plot variables
+    # Plot all 6 variables
     variables = [
-        ("Density ρ", x_exact, rho_exact, x_num, rho_num, "[kg/m³]"),
-        ("Velocity u", x_exact, u_exact, x_num, u_num, "[m/s]"),
-        ("Pressure p", x_exact, p_exact, x_num, p_num, "[Pa]"),
-        ("Internal Energy e", x_exact, e_exact, x_num, e_num, "[J/kg]"),
+        ("Density", "rho", x_exact, rho_exact, x_num, rho_num, "[kg/m^3]"),
+        ("Velocity", "u", x_exact, u_exact, x_num, u_num, "[m/s]"),
+        ("Pressure", "p", x_exact, p_exact, x_num, p_num, "[Pa]"),
+        ("Temperature", "T", x_exact, T_exact, x_num, T_num, "[K]"),
+        ("Internal Energy", "e", x_exact, e_exact, x_num, e_num, "[J/kg]"),
+        ("Entropy", "s", x_exact, s_exact, x_num, s_num, "[J/(kg*K)]"),
     ]
 
-    for idx, (name, x_ex, y_ex, x_n, y_n, unit) in enumerate(variables):
-        ax = axes[idx // 2, idx % 2]
+    for idx, (name, symbol, x_ex, y_ex, x_n, y_n, unit) in enumerate(variables):
+        ax = axes[idx // 3, idx % 3]
         ax.plot(x_ex, y_ex, "b-", linewidth=2, label="Exact")
         ax.plot(x_n, y_n, "ro", markersize=3, label="Numerical")
 
@@ -465,9 +509,9 @@ def plot_piston_test(
             ax.axvline(x_shock, color="r", linestyle="--", alpha=0.5, label="Shock")
 
         ax.set_xlabel("x [m]")
-        ax.set_ylabel(f"{name} {unit}")
-        ax.set_title(name)
-        ax.legend(loc="best")
+        ax.set_ylabel(f"{symbol} {unit}")
+        ax.set_title(f"{name} {symbol}")
+        ax.legend(loc="best", fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0, DOMAIN_LENGTH)
 
@@ -476,7 +520,8 @@ def plot_piston_test(
     # Save figure
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_dtmin" if dt_min else ""
-    filename = f"piston_shock_M{test_num}{suffix}.png"
+    av_suffix = "_av" if use_av else "_noav"
+    filename = f"piston_shock_M{test_num}{suffix}{av_suffix}.png"
     fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
     print(f"  Saved: {filename}")
     if not failed:
@@ -494,11 +539,17 @@ def create_summary_comparison(
     gamma: float,
     c_init: float,
     dt_min: float = None,
+    use_av: bool = True,
 ):
     """
     Create a summary figure comparing all piston shock tests.
+    Shows all 6 variables: density, velocity, pressure, temperature, internal energy, entropy.
     """
-    fig, axes = plt.subplots(4, 4, figsize=(16, 14))
+    # Get gas constant from EOS (for air)
+    eos.set_state_TP(T_STP, P_STP)
+    R_gas = P_STP / (rho_init * T_STP)
+
+    fig, axes = plt.subplots(4, 6, figsize=(20, 14))
 
     for row, test_num in enumerate([1, 2, 3, 4]):
         test_data = PISTON_TESTS[test_num]
@@ -507,15 +558,15 @@ def create_summary_comparison(
 
         # Get numerical solution
         state, grid, stats, failed, error_msg = run_piston_test(
-            test_num, eos, rho_init, gamma, c_init, dt_min=dt_min
+            test_num, eos, rho_init, gamma, c_init, dt_min=dt_min, use_av=use_av
         )
 
         t_plot = stats.final_time if failed else t_end
 
         # Compute exact solution
         x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
-        rho_exact, u_exact, p_exact, e_exact, _, _ = exact_piston_solution(
-            x_exact, t_plot, 0.0, M_s, gamma, rho_init, P_STP
+        rho_exact, u_exact, p_exact, e_exact, T_exact, s_exact, _, _ = exact_piston_solution(
+            x_exact, t_plot, 0.0, M_s, gamma, rho_init, P_STP, R=R_gas
         )
 
         # Numerical solution
@@ -524,12 +575,16 @@ def create_summary_comparison(
         u_num = 0.5 * (state.u[:-1] + state.u[1:])
         p_num = state.p
         e_num = state.e
+        T_num = state.T
+        s_num = state.s
 
         variables = [
-            ("ρ [kg/m³]", rho_exact, rho_num),
+            ("rho [kg/m^3]", rho_exact, rho_num),
             ("u [m/s]", u_exact, u_num),
             ("p [Pa]", p_exact, p_num),
+            ("T [K]", T_exact, T_num),
             ("e [J/kg]", e_exact, e_num),
+            ("s [J/(kg*K)]", s_exact, s_num),
         ]
 
         for col, (name, exact, num) in enumerate(variables):
@@ -548,11 +603,13 @@ def create_summary_comparison(
             ax.grid(True, alpha=0.3)
             ax.set_xlim(0, DOMAIN_LENGTH)
 
-    fig.suptitle("Piston Shock Tests (Air at STP): M_s = 1, 2, 3, 4", fontsize=14, fontweight="bold")
+    av_status = "AV ON" if use_av else "AV OFF"
+    fig.suptitle(f"Piston Shock Tests (Air at STP): M_s = 1, 2, 3, 4 [{av_status}]", fontsize=14, fontweight="bold")
     plt.tight_layout()
 
     suffix = "_dtmin" if dt_min else ""
-    filename = f"piston_shock_summary{suffix}.png"
+    av_suffix = "_av" if use_av else "_noav"
+    filename = f"piston_shock_summary{suffix}{av_suffix}.png"
     fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
     print(f"Saved: {filename}")
     plt.close(fig)
@@ -567,6 +624,7 @@ def main():
     print("Testing shock Mach numbers M_s = 1, 2, 3, 4")
     print("Using Cantera EOS with air at STP")
     print("Reference: [Toro2009] Section 4.2, 6.3.2")
+    print("Artificial Viscosity: [Noh2001], [Margolin2022]")
     print("=" * 70 + "\n")
 
     # Initialize Cantera EOS with air at STP
@@ -582,23 +640,39 @@ def main():
         print(f"  M_s = {M_s}: P = {P:.2f}, u_piston = {u_p:.1f} m/s, D_shock = {D:.1f} m/s")
     print()
 
-    # Run individual tests
+    # Run tests WITH artificial viscosity (wall heating fix)
     print("-" * 70)
-    print("Running individual tests...")
+    print("Running tests WITH artificial viscosity (Noh's wall heating fix)...")
     print("-" * 70)
 
     for test_num in [1, 2, 3, 4]:
-        plot_piston_test(test_num, output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9)
+        plot_piston_test(test_num, output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=True)
         print()
 
-    # Create summary
+    # Create summary with AV
     print("-" * 70)
-    print("Creating summary figure...")
+    print("Creating summary figure (with AV)...")
     print("-" * 70)
-    create_summary_comparison(output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9)
+    create_summary_comparison(output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=True)
+
+    # Run tests WITHOUT artificial viscosity for comparison
+    print("\n" + "-" * 70)
+    print("Running tests WITHOUT artificial viscosity (for comparison)...")
+    print("-" * 70)
+
+    for test_num in [1, 2, 3, 4]:
+        plot_piston_test(test_num, output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=False)
+        print()
+
+    # Create summary without AV
+    print("-" * 70)
+    print("Creating summary figure (without AV)...")
+    print("-" * 70)
+    create_summary_comparison(output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9, use_av=False)
 
     print("\n" + "=" * 70)
     print("VERIFICATION COMPLETE")
+    print("Compare *_av.png vs *_noav.png to see wall heating fix effect")
     print("=" * 70)
 
 

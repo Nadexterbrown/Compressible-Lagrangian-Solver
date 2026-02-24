@@ -123,3 +123,45 @@ Each citation should include:
 **Used in**: `src/lagrangian_solver/boundary/piston.py:90-130`
 
 **Description**: Slip velocity condition for flow at porous boundaries: u_slip = (√K/α_BJ) × du/dn
+
+### Artificial Viscosity - Von Neumann & Richtmyer (Quadratic)
+
+**Reference**: Von Neumann, J., & Richtmyer, R.D. (1950). A method for the numerical calculation of hydrodynamic shocks. *Journal of Applied Physics*, 21(3), 232-237. DOI: 10.1063/1.1699639
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py:100-135`
+
+**Description**: Original quadratic artificial viscosity formulation: Q = ρ × c_Q × dx² × (du/dx)² for du/dx < 0 (compression). Spreads shock discontinuities over several grid cells to prevent Gibbs oscillations.
+
+### Artificial Viscosity - Landshoff (Linear Term)
+
+**Reference**: Landshoff, R. (1955). A numerical method for treating fluid flow in the presence of shocks. *Los Alamos National Laboratory Report* LA-1930.
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py:100-135`
+
+**Description**: Linear artificial viscosity term: Q_lin = ρ × c_L × c × dx × |du/dx|. Damps post-shock oscillations more effectively than quadratic term alone.
+
+### Wall Heating and Artificial Heat Conduction - Noh
+
+**Reference**: Noh, W.F. (1987). Errors for calculations of strong shocks using an artificial viscosity and an artificial heat flux. *Journal of Computational Physics*, 72(1), 78-120. DOI: 10.1016/0021-9991(87)90074-X
+
+**Reference**: Noh, W.F. (2001). Revisiting Wall Heating. *Journal of Computational Physics*, 169(1), 405-407. DOI: 10.1006/jcph.2000.6544
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py:137-185`, `src/lagrangian_solver/equations/conservation.py:170-220`
+
+**Description**: Artificial heat conduction to prevent wall heating numerical artifact. When artificial viscosity appears in momentum but no heat conduction in energy, excess temperature accumulates at boundaries where shocks reflect. Noh's fix: add artificial heat flux q = c_H × ρ × c × ΔT to energy equation.
+
+### Artificial Viscosity Review - Margolin
+
+**Reference**: Margolin, L.G. (2022). Artificial Viscosity – Then and Now. arXiv:2202.11084. https://arxiv.org/abs/2202.11084
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py`
+
+**Description**: Modern review of artificial viscosity methods, coefficient recommendations (c_Q ≈ 2.0, c_L ≈ 0.5), and historical context for shock capturing in Lagrangian hydrodynamics.
+
+### Artificial Viscosity in Toro
+
+**Reference**: [Toro2009] Chapter 11, Sections 11.3-11.4
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py`, `src/lagrangian_solver/equations/conservation.py`
+
+**Description**: Comprehensive treatment of artificial viscosity methods for shock capturing, including Von Neumann-Richtmyer and modified formulations for Lagrangian hydrodynamics.
