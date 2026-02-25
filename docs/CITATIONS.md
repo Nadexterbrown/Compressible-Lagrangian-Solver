@@ -123,3 +123,19 @@ Each citation should include:
 **Used in**: `src/lagrangian_solver/boundary/piston.py:90-130`
 
 **Description**: Slip velocity condition for flow at porous boundaries: u_slip = (√K/α_BJ) × du/dn
+
+### Von Neumann-Richtmyer Quadratic Artificial Viscosity
+
+**Reference**: Von Neumann, J. & Richtmyer, R.D. (1950). A method for the numerical calculation of hydrodynamic shocks. *Journal of Applied Physics*, 21(3), 232-237. DOI: 10.1063/1.1699639
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py:48-55`
+
+**Description**: Quadratic artificial viscosity for shock capturing in Lagrangian hydrodynamics. The viscous stress Q_quad = c₂ × ρ × dx² × (∂u/∂x)² controls shock width and overall entropy production in compression regions.
+
+### Landshoff Linear Artificial Viscosity
+
+**Reference**: Landshoff, R. (1955). A numerical method for treating fluid flow in the presence of shocks. *Los Alamos Scientific Laboratory Report LA-1930*.
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py:45-55`
+
+**Description**: Linear artificial viscosity term Q_lin = c₁ × ρ × c × dx × |∂u/∂x| that supplements the quadratic VNR viscosity. The linear term damps high-frequency oscillations at the shock head that the quadratic term alone cannot eliminate. As noted in the original report: "Although quadratic viscosity successfully controlled unphysical post-shock oscillations, it did NOT totally eliminate them nor the troublesome overshoots that typically appeared at the head of the numerical shock front."

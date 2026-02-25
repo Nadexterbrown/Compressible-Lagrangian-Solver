@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from typing import Tuple
 import numpy as np
 
+from typing import TYPE_CHECKING
+
 from lagrangian_solver.core.state import FlowState, ConservedVariables
 from lagrangian_solver.core.grid import LagrangianGrid
 from lagrangian_solver.equations.eos import EOSBase
@@ -41,6 +43,9 @@ from lagrangian_solver.numerics.riemann import (
     RiemannSolverBase,
     RiemannState,
 )
+
+if TYPE_CHECKING:
+    from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosity
 
 
 @dataclass
@@ -68,24 +73,32 @@ class LagrangianConservation:
     The semi-discrete form of the equations is:
 
         dτ_i/dt = (u_{i+1} - u_i) / dm_i
-        du_i/dt = -(p_{i+1} - p_i) / dm_i   (face-centered)
+        du_i/dt = -((p + Q)_{i+1} - (p + Q)_i) / dm_i   (face-centered)
         dE_i/dt = -(p_{i+1}u_{i+1} - p_i u_i) / dm_i
 
     where i is the cell index and face i is at the left of cell i.
+    Q is the artificial viscous stress (Von Neumann-Richtmyer).
 
-    Reference: [Despres2017] Section 3.4
+    Reference: [Despres2017] Section 3.4, [VNR1950]
     """
 
-    def __init__(self, eos: EOSBase, riemann_solver: RiemannSolverBase):
+    def __init__(
+        self,
+        eos: EOSBase,
+        riemann_solver: RiemannSolverBase,
+        artificial_viscosity: "ArtificialViscosity" = None,
+    ):
         """
         Initialize conservation law solver.
 
         Args:
             eos: Equation of state
             riemann_solver: Riemann solver for computing interface fluxes
+            artificial_viscosity: Optional artificial viscosity for shock capturing
         """
         self._eos = eos
         self._riemann_solver = riemann_solver
+        self._artificial_viscosity = artificial_viscosity
 
     @property
     def eos(self) -> EOSBase:
@@ -96,6 +109,11 @@ class LagrangianConservation:
     def riemann_solver(self) -> RiemannSolverBase:
         """Riemann solver for interface flux computation."""
         return self._riemann_solver
+
+    @property
+    def artificial_viscosity(self) -> "ArtificialViscosity":
+        """Artificial viscosity for shock capturing (may be None)."""
+        return self._artificial_viscosity
 
     def compute_fluxes(
         self, state: FlowState, grid: LagrangianGrid
@@ -158,7 +176,12 @@ class LagrangianConservation:
         Returns the time derivatives:
             dτ/dt, du/dt, dE/dt, dx/dt
 
-        Reference: [Despres2017] Equations (3.15)-(3.17)
+        When artificial viscosity is enabled, the momentum equation becomes:
+            du/dt = -∂(p + Q)/∂m
+
+        where Q is the Von Neumann-Richtmyer viscous stress.
+
+        Reference: [Despres2017] Equations (3.15)-(3.17), [VNR1950]
 
         Args:
             state: Current flow state
@@ -176,13 +199,23 @@ class LagrangianConservation:
         for i in range(n_cells):
             d_tau[i] = (fluxes.u_flux[i + 1] - fluxes.u_flux[i]) / dm[i]
 
-        # Velocity rate at faces: du/dt = -(p_i - p_{i-1}) / dm_face
-        # Uses cell-centered pressures, not face pressures
+        # Compute artificial viscous stress if enabled
+        # Reference: [VNR1950], [Toro2009] Section 11.1
+        if self._artificial_viscosity is not None:
+            Q = self._artificial_viscosity.compute_viscous_stress(state, grid)
+        else:
+            Q = np.zeros(n_cells)
+
+        # Total stress = pressure + artificial viscosity
+        stress = state.p + Q
+
+        # Velocity rate at faces: du/dt = -(stress_i - stress_{i-1}) / dm_face
+        # Uses cell-centered stresses, not face pressures
         # For boundary faces, this is handled by boundary conditions
         d_u = np.zeros(state.n_faces)
         for i in range(1, n_cells):
             dm_avg = 0.5 * (dm[i - 1] + dm[i])
-            d_u[i] = -(state.p[i] - state.p[i - 1]) / dm_avg
+            d_u[i] = -(stress[i] - stress[i - 1]) / dm_avg
 
         # Energy rate: dE/dt = -(pu_{i+1} - pu_i) / dm_i
         d_E = np.zeros(n_cells)
@@ -203,6 +236,9 @@ class LagrangianConservation:
         This is a simpler approach that uses cell pressures directly
         rather than solving Riemann problems at each face.
 
+        When artificial viscosity is enabled, the momentum equation becomes:
+            du/dt = -∂(p + Q)/∂m
+
         Suitable for smooth flows without strong discontinuities.
 
         Args:
@@ -221,13 +257,22 @@ class LagrangianConservation:
         # Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
         d_tau = (u[1:] - u[:-1]) / dm
 
+        # Compute artificial viscous stress if enabled
+        if self._artificial_viscosity is not None:
+            Q = self._artificial_viscosity.compute_viscous_stress(state, grid)
+        else:
+            Q = np.zeros(n_cells)
+
+        # Total stress = pressure + artificial viscosity
+        stress = state.p + Q
+
         # Velocity rate at faces (interior only, boundaries set separately)
         d_u = np.zeros(state.n_faces)
 
-        # For interior faces, use central difference on pressure
+        # For interior faces, use central difference on stress
         for i in range(1, n_cells):
             dm_face = 0.5 * (dm[i - 1] + dm[i])
-            d_u[i] = -(state.p[i] - state.p[i - 1]) / dm_face
+            d_u[i] = -(stress[i] - stress[i - 1]) / dm_face
 
         # Energy rate using face velocities and pressures
         # Interpolate pressure to faces
