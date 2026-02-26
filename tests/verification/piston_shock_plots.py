@@ -12,6 +12,11 @@ where c1 = sqrt(γ * p1 / ρ1) is the undisturbed sound speed.
 
 Uses Cantera EOS with air at STP (298.15 K, 101325 Pa).
 
+Outputs are saved to timestamped subdirectories with:
+- config.json: Test configuration for reproducibility
+- results.json: Test results summary
+- Individual plots for each test showing exact vs numerical
+
 References:
     [Toro2009] Section 4.2 - The Riemann Problem for the Euler Equations
     [Toro2009] Section 6.3.2 - Moving boundaries
@@ -21,6 +26,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
 
 # Add source to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -30,9 +36,12 @@ from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
 from lagrangian_solver.core.state import create_uniform_state
 from lagrangian_solver.equations.eos import CanteraEOS
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver
+from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosityConfig
 from lagrangian_solver.boundary.piston import MovingPistonBC
 from lagrangian_solver.boundary.open import OpenBC
 from lagrangian_solver.boundary.base import BoundarySide
+
+from output_manager import create_output_manager, TestResult, OutputManager
 
 # Grid parameters
 N_CELLS = 100
@@ -262,7 +271,10 @@ def run_piston_test(
     gamma: float,
     c_init: float,
     n_cells: int = N_CELLS,
+    cfl: float = 0.5,
     dt_min: float = None,
+    av_config: ArtificialViscosityConfig = None,
+    use_compatible_energy: bool = False,
 ):
     """
     Run a piston shock test and return numerical solution.
@@ -274,7 +286,10 @@ def run_piston_test(
         gamma: Ratio of specific heats
         c_init: Initial sound speed [m/s]
         n_cells: Number of cells
+        cfl: CFL number
         dt_min: Minimum time step floor
+        av_config: Artificial viscosity configuration
+        use_compatible_energy: Use compatible energy discretization
 
     Returns:
         Tuple of (state, grid, stats, failed, error_msg)
@@ -317,11 +332,13 @@ def run_piston_test(
 
     # Solver configuration
     solver_config = SolverConfig(
-        cfl=0.5,
+        cfl=cfl,
         t_end=t_end,
         dt_output=t_end,
         dt_min=dt_min,
         verbose=False,
+        artificial_viscosity=av_config,
+        use_compatible_energy=use_compatible_energy,
     )
 
     # Create solver
@@ -373,24 +390,32 @@ def run_piston_test(
 
 def plot_piston_test(
     test_num: int,
-    output_dir: Path,
+    output_manager: OutputManager,
     eos: CanteraEOS,
     rho_init: float,
     gamma: float,
     c_init: float,
+    n_cells: int = N_CELLS,
+    cfl: float = 0.5,
     dt_min: float = None,
+    av_config: ArtificialViscosityConfig = None,
+    use_compatible_energy: bool = False,
 ):
     """
     Plot exact vs numerical comparison for a piston shock test.
 
     Args:
         test_num: Test number (1, 2, 3, or 4 for shock Mach number)
-        output_dir: Directory for output plots
+        output_manager: OutputManager for saving results
         eos: Cantera equation of state
         rho_init: Initial density [kg/m³]
         gamma: Ratio of specific heats
         c_init: Initial sound speed [m/s]
+        n_cells: Number of cells
+        cfl: CFL number
         dt_min: Optional minimum time step floor
+        av_config: Artificial viscosity configuration
+        use_compatible_energy: Use compatible energy discretization
     """
     test_data = PISTON_TESTS[test_num]
     M_s = test_data["M_s"]
@@ -401,7 +426,8 @@ def plot_piston_test(
 
     # Get numerical solution
     state, grid, stats, failed, error_msg = run_piston_test(
-        test_num, eos, rho_init, gamma, c_init, dt_min=dt_min
+        test_num, eos, rho_init, gamma, c_init, n_cells=n_cells, cfl=cfl,
+        dt_min=dt_min, av_config=av_config, use_compatible_energy=use_compatible_energy
     )
 
     if failed:
@@ -473,16 +499,24 @@ def plot_piston_test(
 
     plt.tight_layout()
 
-    # Save figure
-    output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_dtmin" if dt_min else ""
-    filename = f"piston_shock_M{test_num}{suffix}.png"
-    fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {filename}")
+    # Save figure using output manager
+    filename = f"piston_shock_M{test_num}.png"
+    output_manager.save_figure(fig, filename)
     if not failed:
         print(f"    Steps: {stats.n_steps}, Wall time: {stats.wall_time:.2f}s")
 
     plt.close(fig)
+
+    # Record result
+    result = TestResult(
+        test_id=test_num,
+        steps=stats.n_steps,
+        wall_time=stats.wall_time,
+        final_time=stats.final_time,
+        failed=failed,
+        error_message=error_msg if error_msg else "",
+    )
+    output_manager.add_result(result)
 
     return failed
 
@@ -558,20 +592,108 @@ def create_summary_comparison(
     plt.close(fig)
 
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Run piston-driven shock wave verification tests"
+    )
+    parser.add_argument(
+        "--n-cells", type=int, default=N_CELLS,
+        help=f"Number of grid cells (default: {N_CELLS})"
+    )
+    parser.add_argument(
+        "--cfl", type=float, default=0.5,
+        help="CFL number (default: 0.5)"
+    )
+    parser.add_argument(
+        "--dt-min", type=float, default=1e-9,
+        help="Minimum time step floor (default: 1e-9)"
+    )
+    parser.add_argument(
+        "--av", action="store_true",
+        help="Enable artificial viscosity"
+    )
+    parser.add_argument(
+        "--av-linear", type=float, default=0.3,
+        help="AV linear coefficient (default: 0.3)"
+    )
+    parser.add_argument(
+        "--av-quad", type=float, default=2.0,
+        help="AV quadratic coefficient (default: 2.0)"
+    )
+    parser.add_argument(
+        "--compatible-energy", action="store_true",
+        help="Use compatible energy discretization"
+    )
+    parser.add_argument(
+        "--description", type=str, default="",
+        help="Description for this test run"
+    )
+    parser.add_argument(
+        "--tests", type=str, default="1,2,3,4",
+        help="Comma-separated list of tests to run (default: 1,2,3,4)"
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main entry point."""
-    output_dir = Path(__file__).parent / "output"
+    args = parse_args()
+
+    # Parse test numbers
+    test_nums = [int(t.strip()) for t in args.tests.split(",")]
+
+    # Initialize Cantera EOS with air at STP
+    eos, rho_init, gamma, c_init = create_air_eos()
+
+    # Build description if not provided
+    if not args.description:
+        parts = ["first_order"]
+        if args.av:
+            parts = [f"av_clin{args.av_linear}_cq{args.av_quad}"]
+        if args.compatible_energy:
+            parts.append("compatible_energy")
+        args.description = "_".join(parts)
+
+    # Create artificial viscosity config if enabled
+    av_config = None
+    if args.av:
+        av_config = ArtificialViscosityConfig(
+            c_linear=args.av_linear,
+            c_quad=args.av_quad,
+        )
+
+    # Create output manager
+    output_manager = create_output_manager(
+        test_type="piston_shock",
+        n_cells=args.n_cells,
+        cfl=args.cfl,
+        gamma=gamma,
+        description=args.description,
+        dt_min=args.dt_min,
+        av_enabled=args.av,
+        av_c_linear=args.av_linear if args.av else 0.0,
+        av_c_quad=args.av_quad if args.av else 0.0,
+        use_compatible_energy=args.compatible_energy,
+        domain_length=DOMAIN_LENGTH,
+        T_STP=T_STP,
+        P_STP=P_STP,
+    )
 
     print("=" * 70)
     print("PISTON-DRIVEN SHOCK WAVE VERIFICATION")
     print("Testing shock Mach numbers M_s = 1, 2, 3, 4")
     print("Using Cantera EOS with air at STP")
     print("Reference: [Toro2009] Section 4.2, 6.3.2")
+    print("=" * 70)
+    print(f"Configuration: {args.description}")
+    print(f"  N_cells: {args.n_cells}, CFL: {args.cfl}, dt_min: {args.dt_min:.0e}")
+    if args.av:
+        print(f"  AV: c_linear={args.av_linear}, c_quad={args.av_quad}")
+    if args.compatible_energy:
+        print(f"  Compatible energy: enabled")
+    print(f"Output: {output_manager.output_dir}")
     print("=" * 70 + "\n")
-
-    # Initialize Cantera EOS with air at STP
-    eos, rho_init, gamma, c_init = create_air_eos()
-    print()
 
     # Print piston velocities for reference
     print("Computed parameters for each shock Mach number:")
@@ -587,15 +709,16 @@ def main():
     print("Running individual tests...")
     print("-" * 70)
 
-    for test_num in [1, 2, 3, 4]:
-        plot_piston_test(test_num, output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9)
+    for test_num in test_nums:
+        plot_piston_test(
+            test_num, output_manager, eos, rho_init, gamma, c_init,
+            n_cells=args.n_cells, cfl=args.cfl, dt_min=args.dt_min,
+            av_config=av_config, use_compatible_energy=args.compatible_energy
+        )
         print()
 
-    # Create summary
-    print("-" * 70)
-    print("Creating summary figure...")
-    print("-" * 70)
-    create_summary_comparison(output_dir, eos, rho_init, gamma, c_init, dt_min=1e-9)
+    # Print summary
+    output_manager.print_summary()
 
     print("\n" + "=" * 70)
     print("VERIFICATION COMPLETE")
