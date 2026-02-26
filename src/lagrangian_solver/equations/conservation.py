@@ -217,18 +217,29 @@ class LagrangianConservation:
             dm_avg = 0.5 * (dm[i - 1] + dm[i])
             d_u[i] = -(stress[i] - stress[i - 1]) / dm_avg
 
-        # Energy rate: dE/dt = -(pu_{i+1} - pu_i) / dm_i
-        #
-        # NOTE: The artificial viscosity Q affects momentum but the energy
-        # dissipation is handled implicitly through the velocity changes.
-        # Adding explicit Q*u terms to the energy flux can cause instabilities.
-        #
-        # For now, use only the Riemann pressure flux for energy.
-        # TODO: Implement compatible energy discretization (Burton 1992) for
-        # proper AV-energy coupling.
+        # Energy rate: dE/dt = -∂((p+Q)u)/∂m
+        # The Riemann flux gives p*u, we need to add the AV work term Q*u
+        # Q is cell-centered, interpolate to faces for the energy flux
+        # Reference: [VNR1950], [Caramana1998]
         d_E = np.zeros(n_cells)
+
+        # Interpolate Q to faces for energy flux
+        Q_face = np.zeros(state.n_faces)
+        Q_face[0] = Q[0]  # Boundary: use first cell value
+        Q_face[-1] = Q[-1]  # Boundary: use last cell value
+        for i in range(1, n_cells):
+            Q_face[i] = 0.5 * (Q[i - 1] + Q[i])
+
+        # Total energy flux at faces: (p + Q) * u
+        # fluxes.pu_flux already has p*u from Riemann solver
+        # Add Q*u contribution
+        Qu_flux = Q_face * fluxes.u_flux
+
         for i in range(n_cells):
-            d_E[i] = -(fluxes.pu_flux[i + 1] - fluxes.pu_flux[i]) / dm[i]
+            # Total energy flux = Riemann (p*u) + AV work (Q*u)
+            total_flux_right = fluxes.pu_flux[i + 1] + Qu_flux[i + 1]
+            total_flux_left = fluxes.pu_flux[i] + Qu_flux[i]
+            d_E[i] = -(total_flux_right - total_flux_left) / dm[i]
 
         # Position rate: dx/dt = u
         d_x = fluxes.u_flux.copy()
@@ -282,17 +293,17 @@ class LagrangianConservation:
             dm_face = 0.5 * (dm[i - 1] + dm[i])
             d_u[i] = -(stress[i] - stress[i - 1]) / dm_face
 
-        # Energy rate using face velocities and pressures
-        # NOTE: AV not included in energy flux - see compute_residual for explanation
-        # Interpolate pressure to faces
-        p_face = np.zeros(state.n_faces)
-        p_face[0] = state.p[0]
-        p_face[-1] = state.p[-1]
-        p_face[1:-1] = 0.5 * (state.p[:-1] + state.p[1:])
+        # Energy rate using face velocities and total stress (p + Q)
+        # Interpolate stress to faces for energy flux
+        # Reference: [VNR1950], [Caramana1998]
+        stress_face = np.zeros(state.n_faces)
+        stress_face[0] = stress[0]
+        stress_face[-1] = stress[-1]
+        stress_face[1:-1] = 0.5 * (stress[:-1] + stress[1:])
 
-        # dE/dt = -(pu_{i+1} - pu_i) / dm_i
-        pu_face = p_face * u
-        d_E = -(pu_face[1:] - pu_face[:-1]) / dm
+        # dE/dt = -∂((p+Q)u)/∂m
+        stress_u_face = stress_face * u
+        d_E = -(stress_u_face[1:] - stress_u_face[:-1]) / dm
 
         # Position rate: dx/dt = u
         d_x = u.copy()
