@@ -139,3 +139,15 @@ Each citation should include:
 **Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py:45-55`
 
 **Description**: Linear artificial viscosity term Q_lin = c₁ × ρ × c × dx × |∂u/∂x| that supplements the quadratic VNR viscosity. The linear term damps high-frequency oscillations at the shock head that the quadratic term alone cannot eliminate. As noted in the original report: "Although quadratic viscosity successfully controlled unphysical post-shock oscillations, it did NOT totally eliminate them nor the troublesome overshoots that typically appeared at the head of the numerical shock front."
+
+### Compatible Energy Discretization
+
+**Reference**: Burton, D.E. (1992). Consistent finite-volume discretization of hydrodynamic conservation laws for unstructured grids. *Lawrence Livermore National Laboratory Report UCRL-JC-105926*.
+
+**Used in**: `src/lagrangian_solver/core/state.py:77-152`, `src/lagrangian_solver/equations/conservation.py:230-290`, `src/lagrangian_solver/numerics/time_integration.py:405-540`
+
+**Description**: Compatible energy discretization framework for Lagrangian hydrodynamics. This approach solves for internal energy directly (de/dt = -stress × dτ) rather than extracting it via e = E - ½u², avoiding numerical issues at strong shocks where subtracting two large numbers loses precision. The current implementation uses a simplified formulation that directly integrates the internal energy equation.
+
+**Additional Reference**: Caramana, E.J., Shashkov, M.J., and Whalen, P.P. (1998). Formulations of artificial viscosity for multi-dimensional shock wave computations. *Journal of Computational Physics*, 144(1), 70-97. DOI: 10.1006/jcph.1998.5989
+
+**Description**: Extends compatible discretization to multi-dimensional cases with tensor artificial viscosity. Provides theoretical foundation for ensuring exact total energy conservation in staggered-grid Lagrangian hydrodynamics.

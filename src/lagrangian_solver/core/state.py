@@ -75,6 +75,71 @@ class ConservedVariables:
 
 
 @dataclass
+class ConservedVariablesCompatible:
+    """
+    Conserved variables for compatible energy discretization.
+
+    In compatible energy discretization, we solve for internal energy (e)
+    directly rather than total energy (E). This avoids the numerical issues
+    of extracting internal energy via subtraction (e = E - ½u²) which can
+    lose precision at strong shocks.
+
+    Reference:
+        [Burton1992] UCRL-JC-105926 - Consistent Finite-Volume Discretization
+        [Caramana1998] JCP 146 - Formulations of Artificial Viscosity
+
+    Attributes:
+        tau: Specific volume (cell-centered) [m³/kg]
+        u: Velocity (face-centered) [m/s]
+        e: Specific internal energy (cell-centered) [J/kg]
+    """
+
+    tau: np.ndarray  # Cell-centered, shape (n_cells,)
+    u: np.ndarray  # Face-centered, shape (n_cells + 1,)
+    e: np.ndarray  # Cell-centered, shape (n_cells,)
+
+    def __post_init__(self):
+        """Validate array shapes."""
+        n_cells = len(self.tau)
+        if len(self.e) != n_cells:
+            raise ValueError(
+                f"e must have same length as tau: {len(self.e)} != {n_cells}"
+            )
+        if len(self.u) != n_cells + 1:
+            raise ValueError(
+                f"u must have length n_cells+1: {len(self.u)} != {n_cells + 1}"
+            )
+
+    @property
+    def n_cells(self) -> int:
+        """Number of cells in the domain."""
+        return len(self.tau)
+
+    def copy(self) -> "ConservedVariablesCompatible":
+        """Create a deep copy of the conserved variables."""
+        return ConservedVariablesCompatible(
+            tau=self.tau.copy(),
+            u=self.u.copy(),
+            e=self.e.copy(),
+        )
+
+    def to_total_energy(self) -> ConservedVariables:
+        """
+        Convert to total energy formulation.
+
+        Returns:
+            ConservedVariables with E = e + ½u_cell²
+        """
+        u_cell = 0.5 * (self.u[:-1] + self.u[1:])
+        E = self.e + 0.5 * u_cell**2
+        return ConservedVariables(
+            tau=self.tau.copy(),
+            u=self.u.copy(),
+            E=E,
+        )
+
+
+@dataclass
 class FlowState:
     """
     Complete flow state on a Lagrangian grid.
@@ -182,6 +247,14 @@ class FlowState:
             E=self.E.copy(),
         )
 
+    def get_conserved_compatible(self) -> ConservedVariablesCompatible:
+        """Extract compatible conserved variables (with internal energy) from state."""
+        return ConservedVariablesCompatible(
+            tau=self.tau.copy(),
+            u=self.u.copy(),
+            e=self.e.copy(),
+        )
+
     def copy(self) -> "FlowState":
         """Create a deep copy of the flow state."""
         return FlowState(
@@ -262,6 +335,88 @@ class FlowState:
         c = eos.sound_speed(rho, p)
         gamma = eos.get_gamma(rho, p)
         s = eos.entropy(rho, p)
+
+        # Compute cell masses
+        dm = np.diff(m)
+
+        return cls(
+            tau=tau,
+            rho=rho,
+            p=p,
+            T=T,
+            e=e,
+            E=E,
+            c=c,
+            gamma=gamma,
+            s=s,
+            x=x,
+            u=u,
+            m=m,
+            dm=dm,
+        )
+
+    @classmethod
+    def from_conserved_compatible(
+        cls,
+        conserved: ConservedVariablesCompatible,
+        x: np.ndarray,
+        m: np.ndarray,
+        eos: EOSBase,
+        enforce_positivity: bool = True,
+    ) -> "FlowState":
+        """
+        Construct a FlowState from compatible conserved variables (internal energy).
+
+        This method is used with compatible energy discretization where internal
+        energy (e) is evolved directly, avoiding the numerical issues of computing
+        e = E - ½u² via subtraction.
+
+        Reference:
+            [Burton1992] UCRL-JC-105926 - Compatible energy discretization
+            [Caramana1998] JCP 146 - Formulations of Artificial Viscosity
+
+        Args:
+            conserved: ConservedVariablesCompatible containing tau, u, e
+            x: Face positions [m]
+            m: Cumulative mass at faces [kg]
+            eos: Equation of state for computing thermodynamic properties
+            enforce_positivity: If True, clip non-physical values
+
+        Returns:
+            Complete FlowState with all derived quantities
+        """
+        tau = conserved.tau.copy()
+        u = conserved.u.copy()
+        e = conserved.e.copy()
+
+        # Positivity enforcement for robustness with strong shocks
+        if enforce_positivity:
+            # Minimum allowed specific volume (max density ~1e6 kg/m³)
+            tau_min = 1e-10
+            tau = np.maximum(tau, tau_min)
+
+        # Compute density from specific volume
+        rho = 1.0 / tau
+
+        # Internal energy is provided directly - no subtraction needed
+        # This is the key advantage of compatible discretization
+
+        # Use EOS to get pressure, temperature, sound speed, and entropy
+        p = eos.pressure(rho, e)
+
+        # Ensure positive pressure
+        if enforce_positivity:
+            p_min = 1e-10
+            p = np.maximum(p, p_min)
+
+        T = eos.temperature(rho, e)
+        c = eos.sound_speed(rho, p)
+        gamma = eos.get_gamma(rho, p)
+        s = eos.entropy(rho, p)
+
+        # Compute total energy from internal energy
+        u_cell = 0.5 * (u[:-1] + u[1:])
+        E = e + 0.5 * u_cell**2
 
         # Compute cell masses
         dm = np.diff(m)
@@ -387,6 +542,52 @@ class FlowState:
 
         # Mass stays constant in Lagrangian formulation
         # Only positions change, masses dm are fixed
+
+    def update_from_conserved_compatible(
+        self,
+        tau: np.ndarray,
+        u: np.ndarray,
+        e: np.ndarray,
+        x: np.ndarray,
+        eos: EOSBase,
+    ):
+        """
+        Update the flow state in-place from compatible conserved variables.
+
+        This method is used with compatible energy discretization where internal
+        energy (e) is evolved directly.
+
+        Reference: [Burton1992] UCRL-JC-105926
+
+        Args:
+            tau: New specific volume (cell-centered) [m³/kg]
+            u: New velocity (face-centered) [m/s]
+            e: New specific internal energy (cell-centered) [J/kg]
+            x: New face positions [m]
+            eos: Equation of state
+        """
+        self.tau[:] = tau
+        self.u[:] = u
+        self.e[:] = e
+        self.x[:] = x
+
+        # Update derived quantities
+        self.rho[:] = 1.0 / tau
+
+        # Cell-averaged velocity for total energy
+        u_cell = 0.5 * (u[:-1] + u[1:])
+
+        # Total energy from internal energy (computed, not primary variable)
+        self.E[:] = e + 0.5 * u_cell**2
+
+        # EOS quantities - internal energy is primary, no subtraction
+        self.p[:] = eos.pressure(self.rho, self.e)
+        self.T[:] = eos.temperature(self.rho, self.e)
+        self.c[:] = eos.sound_speed(self.rho, self.p)
+        self.gamma[:] = eos.get_gamma(self.rho, self.p)
+        self.s[:] = eos.entropy(self.rho, self.p)
+
+        # Mass stays constant in Lagrangian formulation
 
 
 def create_uniform_state(

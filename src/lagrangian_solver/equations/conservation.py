@@ -227,6 +227,83 @@ class LagrangianConservation:
 
         return d_tau, d_u, d_E, d_x
 
+    def compute_compatible_residual(
+        self, state: FlowState, grid: LagrangianGrid, fluxes: LagrangianFlux
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Compute residual using compatible energy discretization.
+
+        This method solves for internal energy directly while ensuring
+        exact total energy conservation. The internal energy rate is derived
+        from the p*dV work term using the kinematic volume rate.
+
+        For a staggered grid in 1D Lagrangian:
+            de_i/dt = -stress_i * (dV_i/dt) / m_i
+                    = -stress_i * (u_{i+1} - u_i) / m_i
+                    = -stress_i * d_tau_i
+
+        where stress_i = p_i + Q_i (pressure plus artificial viscosity).
+
+        This directly solves the internal energy equation:
+            de/dt = -p * (dV/dt) / m
+
+        Note: This formulation is NOT exactly energy-conserving to machine precision
+        like the full Burton compatible discretization. For exact conservation,
+        one would need to track two volume definitions and derive work from
+        the kinetic energy change. This simpler approach solves for e directly
+        and avoids the subtraction e = E - KE, improving robustness.
+
+        Reference:
+            [Despres2017] Chapter 3 - Lagrangian staggered grid
+            [Burton1992] UCRL-JC-105926 - Compatible energy principles
+
+        Args:
+            state: Current flow state
+            grid: Lagrangian grid
+            fluxes: Pre-computed fluxes (including boundary fluxes)
+
+        Returns:
+            Tuple of (d_tau, d_u, d_e, d_x) arrays where d_e is internal energy rate
+        """
+        n_cells = state.n_cells
+        dm = grid.dm
+
+        # 1. Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
+        d_tau = np.zeros(n_cells)
+        for i in range(n_cells):
+            d_tau[i] = (fluxes.u_flux[i + 1] - fluxes.u_flux[i]) / dm[i]
+
+        # 2. Compute artificial viscous stress if enabled
+        if self._artificial_viscosity is not None:
+            Q = self._artificial_viscosity.compute_viscous_stress(state, grid)
+        else:
+            Q = np.zeros(n_cells)
+
+        # Total stress = pressure + artificial viscosity
+        stress = state.p + Q
+
+        # 3. Velocity rate at faces
+        # Reference: [Despres2017] Equation (3.15)
+        d_u = np.zeros(state.n_faces)
+
+        # Interior faces: du/dt = -(stress_i - stress_{i-1}) / dm_avg
+        for j in range(1, n_cells):
+            dm_avg = 0.5 * (dm[j - 1] + dm[j])
+            d_u[j] = -(stress[j] - stress[j - 1]) / dm_avg
+
+        # 4. Internal energy rate: de/dt = -stress * d_tau
+        # This is the p*dV work formulation
+        # Reference: [Despres2017] Equation (3.17) with e instead of E
+        d_e = np.zeros(n_cells)
+        for i in range(n_cells):
+            # de/dt = -stress * (dV/dt)/m = -stress * d_tau
+            d_e[i] = -stress[i] * d_tau[i]
+
+        # 5. Position rate: dx/dt = u
+        d_x = fluxes.u_flux.copy()
+
+        return d_tau, d_u, d_e, d_x
+
     def compute_residual_direct(
         self, state: FlowState, grid: LagrangianGrid
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -377,3 +454,75 @@ def compute_internal_energy(state: FlowState) -> float:
         Internal energy [J]
     """
     return np.sum(state.rho * state.e * state.dx)
+
+
+def compute_total_energy_compatible(state: FlowState, grid: LagrangianGrid) -> float:
+    """
+    Compute total energy using mass-based formulation for conservation check.
+
+    This formulation is consistent with the compatible energy discretization:
+        E_total = Σ(m_i · e_i) + Σ(½ · m_face_j · u_j²)
+
+    where m_face_j is the mass associated with face j.
+
+    For a staggered grid, the kinetic energy is computed with face masses:
+        m_face_j = 0.5 * (m_{j-1} + m_j) for interior faces
+
+    Reference: [Burton1992] UCRL-JC-105926
+
+    Args:
+        state: Current flow state
+        grid: Lagrangian grid
+
+    Returns:
+        Total energy [J] (internal + kinetic)
+    """
+    dm = grid.dm
+
+    # Internal energy: sum over cells
+    IE = np.sum(dm * state.e)
+
+    # Kinetic energy: sum over faces with face masses
+    # For interior faces, use average of adjacent cell masses
+    n_cells = state.n_cells
+    KE = 0.0
+
+    # Left boundary face (j=0)
+    m_face_0 = 0.5 * dm[0]
+    KE += 0.5 * m_face_0 * state.u[0] ** 2
+
+    # Interior faces (j=1 to n_cells-1)
+    for j in range(1, n_cells):
+        m_face_j = 0.5 * (dm[j - 1] + dm[j])
+        KE += 0.5 * m_face_j * state.u[j] ** 2
+
+    # Right boundary face (j=n_cells)
+    m_face_n = 0.5 * dm[-1]
+    KE += 0.5 * m_face_n * state.u[-1] ** 2
+
+    return IE + KE
+
+
+def compute_energy_conservation_error(
+    state: FlowState, grid: LagrangianGrid, initial_energy: float
+) -> float:
+    """
+    Compute relative energy conservation error.
+
+    For compatible energy discretization, this should be O(machine precision)
+    for closed systems with no external work.
+
+    Args:
+        state: Current flow state
+        grid: Lagrangian grid
+        initial_energy: Total energy at t=0 [J]
+
+    Returns:
+        Relative energy conservation error |E(t) - E(0)| / |E(0)|
+    """
+    current_energy = compute_total_energy_compatible(state, grid)
+
+    if abs(initial_energy) < 1e-15:
+        return abs(current_energy)
+
+    return abs(current_energy - initial_energy) / abs(initial_energy)

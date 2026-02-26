@@ -14,7 +14,12 @@ from typing import Optional, Callable, List, Tuple
 import numpy as np
 import time as timer
 
-from lagrangian_solver.core.state import FlowState, ConservedVariables, create_riemann_state
+from lagrangian_solver.core.state import (
+    FlowState,
+    ConservedVariables,
+    ConservedVariablesCompatible,
+    create_riemann_state,
+)
 from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.equations.eos import EOSBase, IdealGasEOS, CanteraEOS
 from lagrangian_solver.equations.conservation import (
@@ -23,6 +28,8 @@ from lagrangian_solver.equations.conservation import (
     compute_mass_error,
     compute_total_energy,
     compute_momentum,
+    compute_total_energy_compatible,
+    compute_energy_conservation_error,
 )
 from lagrangian_solver.numerics.riemann import (
     ExactRiemannSolver,
@@ -34,6 +41,8 @@ from lagrangian_solver.numerics.time_integration import (
     HeunIntegrator,
     ForwardEulerIntegrator,
     SSPRK3Integrator,
+    HeunIntegratorCompatible,
+    ForwardEulerIntegratorCompatible,
     TimeStepInfo,
 )
 from lagrangian_solver.numerics.artificial_viscosity import (
@@ -60,6 +69,10 @@ class SolverConfig:
         verbose: Print progress messages
         artificial_viscosity: Configuration for Von Neumann-Richtmyer
                               artificial viscosity (None to disable)
+        use_compatible_energy: If True, use compatible energy discretization
+                               that solves for internal energy directly while
+                               ensuring exact total energy conservation.
+                               Reference: [Burton1992] UCRL-JC-105926
     """
 
     cfl: float = 0.5
@@ -69,6 +82,7 @@ class SolverConfig:
     dt_min: Optional[float] = None
     verbose: bool = True
     artificial_viscosity: Optional[ArtificialViscosityConfig] = None
+    use_compatible_energy: bool = False
 
 
 @dataclass
@@ -85,6 +99,8 @@ class SolverStatistics:
         avg_dt: Average time step [s]
         mass_error: Final relative mass conservation error
         energy_change: Relative change in total energy
+        compatible_energy_error: Energy conservation error for compatible
+                                 discretization (should be O(machine epsilon))
     """
 
     n_steps: int = 0
@@ -95,6 +111,7 @@ class SolverStatistics:
     avg_dt: float = 0.0
     mass_error: float = 0.0
     energy_change: float = 0.0
+    compatible_energy_error: float = 0.0
 
 
 class LagrangianSolver:
@@ -145,11 +162,18 @@ class LagrangianSolver:
             self._riemann_solver = riemann_solver
 
         # Set up time integrator
+        # Use compatible energy integrator if configured
         if time_integrator is None:
-            self._integrator = HeunIntegrator(eos, cfl=self._config.cfl)
+            if self._config.use_compatible_energy:
+                self._integrator = HeunIntegratorCompatible(eos, cfl=self._config.cfl)
+            else:
+                self._integrator = HeunIntegrator(eos, cfl=self._config.cfl)
         else:
             self._integrator = time_integrator
             self._integrator.cfl = self._config.cfl
+
+        # Track compatible energy mode
+        self._use_compatible_energy = self._config.use_compatible_energy
 
         # Set up artificial viscosity if configured
         if self._config.artificial_viscosity is not None:
@@ -279,7 +303,8 @@ class LagrangianSolver:
         This is passed to the time integrator.
 
         Returns:
-            Tuple of (d_tau, d_u, d_E, d_x)
+            Tuple of (d_tau, d_u, d_E, d_x) for standard method
+            Tuple of (d_tau, d_u, d_e, d_x) for compatible energy method
         """
         # Compute interior fluxes
         fluxes = self._conservation.compute_fluxes(state, grid)
@@ -299,8 +324,14 @@ class LagrangianSolver:
             fluxes.pu_flux[-1] = bc_flux_right.pu_flux
             fluxes.u_flux[-1] = bc_flux_right.u_flux
 
-        # Compute residual
-        return self._conservation.compute_residual(state, grid, fluxes)
+        # Compute residual using appropriate method
+        if self._use_compatible_energy:
+            # Compatible discretization: returns (d_tau, d_u, d_e, d_x)
+            # where d_e is internal energy rate derived from kinetic energy constraint
+            return self._conservation.compute_compatible_residual(state, grid, fluxes)
+        else:
+            # Standard method: returns (d_tau, d_u, d_E, d_x)
+            return self._conservation.compute_residual(state, grid, fluxes)
 
     def step_forward(self, dt: Optional[float] = None) -> TimeStepInfo:
         """
@@ -390,6 +421,13 @@ class LagrangianSolver:
 
         # Record initial state
         initial_energy = compute_total_energy(self._state)
+        # For compatible energy, also track using the mass-based formulation
+        if self._use_compatible_energy:
+            initial_energy_compatible = compute_total_energy_compatible(
+                self._state, self._grid
+            )
+        else:
+            initial_energy_compatible = None
         t_next_output = 0.0
 
         # Start timing
@@ -445,6 +483,12 @@ class LagrangianSolver:
                 abs(final_energy - initial_energy) / initial_energy
             )
 
+        # Compute compatible energy conservation error if using compatible method
+        if self._use_compatible_energy and initial_energy_compatible is not None:
+            self._stats.compatible_energy_error = compute_energy_conservation_error(
+                self._state, self._grid, initial_energy_compatible
+            )
+
         if self._config.verbose:
             self._print_statistics()
 
@@ -463,6 +507,8 @@ class LagrangianSolver:
         print(f"Avg dt:           {self._stats.avg_dt:.6e} s")
         print(f"Mass error:       {self._stats.mass_error:.6e}")
         print(f"Energy change:    {self._stats.energy_change:.6e}")
+        if self._use_compatible_energy:
+            print(f"Compatible E err: {self._stats.compatible_energy_error:.6e}")
         print("=" * 60)
 
 

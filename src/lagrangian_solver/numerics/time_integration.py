@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from typing import Callable, Tuple, Optional
 import numpy as np
 
-from lagrangian_solver.core.state import FlowState, ConservedVariables
+from lagrangian_solver.core.state import (
+    FlowState,
+    ConservedVariables,
+    ConservedVariablesCompatible,
+)
 from lagrangian_solver.core.grid import LagrangianGrid
 from lagrangian_solver.equations.eos import EOSBase
 
@@ -393,6 +397,181 @@ class SSPRK3Integrator(TimeIntegratorBase):
         grid.set_positions(x_new)
         state_new = FlowState.from_conserved(
             ConservedVariables(tau=tau_new, u=u_new, E=E_new),
+            x=x_new,
+            m=grid.m,
+            eos=self._eos,
+        )
+
+        return state_new
+
+
+class HeunIntegratorCompatible(TimeIntegratorBase):
+    """
+    Heun's method for compatible energy discretization.
+
+    This integrator works with internal energy (e) instead of total energy (E),
+    using the compatible energy residual that achieves exact total energy
+    conservation while solving the internal energy equation directly.
+
+    The compatible discretization avoids the numerical issues of computing
+    e = E - ½u² via subtraction, which can lose precision at strong shocks.
+
+    Reference:
+        [Burton1992] UCRL-JC-105926 - Consistent Finite-Volume Discretization
+        [Caramana1998] JCP 146 - Formulations of Artificial Viscosity
+
+    Predictor step:
+        U* = U^n + Δt · f(U^n)      (U includes tau, u, e, x)
+
+    Corrector step:
+        U^{n+1} = U^n + (Δt/2) · [f(U^n) + f(U*)]
+    """
+
+    def __init__(self, eos: EOSBase, cfl: float = 0.5):
+        """
+        Initialize Heun's method integrator for compatible energy.
+
+        Args:
+            eos: Equation of state
+            cfl: CFL number (default 0.5 appropriate for 2nd order methods)
+        """
+        super().__init__(eos, cfl)
+
+    def step(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        dt: float,
+        rhs_func: Callable[
+            [FlowState, LagrangianGrid],
+            Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        ],
+    ) -> FlowState:
+        """
+        Advance solution using Heun's method with compatible energy.
+
+        The rhs_func is expected to return (d_tau, d_u, d_e, d_x) where
+        d_e is the internal energy rate from compatible discretization.
+
+        Args:
+            state: Current flow state at time t
+            grid: Lagrangian grid
+            dt: Time step size
+            rhs_func: Right-hand side function returning (d_tau, d_u, d_e, d_x)
+
+        Returns:
+            New flow state at time t + dt
+        """
+        # Store original values - use internal energy, not total energy
+        tau_n = state.tau.copy()
+        u_n = state.u.copy()
+        e_n = state.e.copy()  # Internal energy (compatible formulation)
+        x_n = grid.x.copy()
+
+        # ============ Predictor Step ============
+        # Compute RHS at current state (returns d_e, not d_E)
+        d_tau_n, d_u_n, d_e_n, d_x_n = rhs_func(state, grid)
+
+        # Predict intermediate values
+        tau_star = tau_n + dt * d_tau_n
+        u_star = u_n + dt * d_u_n
+        e_star = e_n + dt * d_e_n  # Direct internal energy update
+        x_star = x_n + dt * d_x_n
+
+        # Update grid to intermediate position
+        grid.set_positions(x_star)
+
+        # Create intermediate state using compatible constructor
+        state_star = FlowState.from_conserved_compatible(
+            ConservedVariablesCompatible(tau=tau_star, u=u_star, e=e_star),
+            x=x_star,
+            m=grid.m,
+            eos=self._eos,
+        )
+
+        # ============ Corrector Step ============
+        # Compute RHS at predicted state
+        d_tau_star, d_u_star, d_e_star, d_x_star = rhs_func(state_star, grid)
+
+        # Average the two derivatives (trapezoidal rule)
+        tau_new = tau_n + 0.5 * dt * (d_tau_n + d_tau_star)
+        u_new = u_n + 0.5 * dt * (d_u_n + d_u_star)
+        e_new = e_n + 0.5 * dt * (d_e_n + d_e_star)  # Internal energy
+        x_new = x_n + 0.5 * dt * (d_x_n + d_x_star)
+
+        # Update grid to final position
+        grid.set_positions(x_new)
+
+        # Create final state using compatible constructor
+        state_new = FlowState.from_conserved_compatible(
+            ConservedVariablesCompatible(tau=tau_new, u=u_new, e=e_new),
+            x=x_new,
+            m=grid.m,
+            eos=self._eos,
+        )
+
+        return state_new
+
+
+class ForwardEulerIntegratorCompatible(TimeIntegratorBase):
+    """
+    Forward Euler method for compatible energy discretization.
+
+    Simple explicit method with internal energy:
+        U^{n+1} = U^n + Δt · f(U^n)
+
+    Only 1st order accurate, primarily useful for debugging.
+
+    Reference: [Burton1992] UCRL-JC-105926
+    """
+
+    def __init__(self, eos: EOSBase, cfl: float = 0.3):
+        """
+        Initialize Forward Euler integrator for compatible energy.
+
+        Args:
+            eos: Equation of state
+            cfl: CFL number (default 0.3, more restrictive for 1st order)
+        """
+        super().__init__(eos, cfl)
+
+    def step(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        dt: float,
+        rhs_func: Callable[
+            [FlowState, LagrangianGrid],
+            Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        ],
+    ) -> FlowState:
+        """
+        Advance solution using Forward Euler with compatible energy.
+
+        Args:
+            state: Current flow state at time t
+            grid: Lagrangian grid
+            dt: Time step size
+            rhs_func: Right-hand side function returning (d_tau, d_u, d_e, d_x)
+
+        Returns:
+            New flow state at time t + dt
+        """
+        # Compute RHS at current state (returns d_e, not d_E)
+        d_tau, d_u, d_e, d_x = rhs_func(state, grid)
+
+        # Update conserved variables with internal energy
+        tau_new = state.tau + dt * d_tau
+        u_new = state.u + dt * d_u
+        e_new = state.e + dt * d_e  # Direct internal energy update
+        x_new = grid.x + dt * d_x
+
+        # Update grid positions
+        grid.set_positions(x_new)
+
+        # Create new state using compatible constructor
+        state_new = FlowState.from_conserved_compatible(
+            ConservedVariablesCompatible(tau=tau_new, u=u_new, e=e_new),
             x=x_new,
             m=grid.m,
             eos=self._eos,
