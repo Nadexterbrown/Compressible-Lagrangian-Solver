@@ -218,6 +218,14 @@ class LagrangianConservation:
             d_u[i] = -(stress[i] - stress[i - 1]) / dm_avg
 
         # Energy rate: dE/dt = -(pu_{i+1} - pu_i) / dm_i
+        #
+        # NOTE: The artificial viscosity Q affects momentum but the energy
+        # dissipation is handled implicitly through the velocity changes.
+        # Adding explicit Q*u terms to the energy flux can cause instabilities.
+        #
+        # For now, use only the Riemann pressure flux for energy.
+        # TODO: Implement compatible energy discretization (Burton 1992) for
+        # proper AV-energy coupling.
         d_E = np.zeros(n_cells)
         for i in range(n_cells):
             d_E[i] = -(fluxes.pu_flux[i + 1] - fluxes.pu_flux[i]) / dm[i]
@@ -275,6 +283,7 @@ class LagrangianConservation:
             d_u[i] = -(stress[i] - stress[i - 1]) / dm_face
 
         # Energy rate using face velocities and pressures
+        # NOTE: AV not included in energy flux - see compute_residual for explanation
         # Interpolate pressure to faces
         p_face = np.zeros(state.n_faces)
         p_face[0] = state.p[0]
