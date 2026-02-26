@@ -220,13 +220,30 @@ class LagrangianConservation:
         # Energy rate: dE/dt = -∂((p+Q)u)/∂m
         # The Riemann flux gives p*u, we need to add the AV work term Q*u
         # Q is cell-centered, interpolate to faces for the energy flux
-        # Reference: [VNR1950], [Caramana1998]
+        #
+        # GHOST CELL APPROACH for boundaries:
+        # At solid walls, we use a ghost cell with Q_ghost = 0 to represent
+        # that the artificial viscosity acts only inside the gas, not at the
+        # wall interface. The wall does mechanical work p*u, not (p+Q)*u.
+        # This gives Q_face = 0.5*(Q_ghost + Q_interior) = 0.5*Q_interior
+        # at boundaries, which properly accounts for the one-sided nature
+        # of AV dissipation at walls.
+        #
+        # Reference: [VNR1950], [Caramana1998], Ghost cell methods
         d_E = np.zeros(n_cells)
 
-        # Interpolate Q to faces for energy flux
+        # Interpolate Q to faces using ghost cell approach
         Q_face = np.zeros(state.n_faces)
-        Q_face[0] = Q[0]  # Boundary: use first cell value
-        Q_face[-1] = Q[-1]  # Boundary: use last cell value
+
+        # Left boundary: ghost cell has Q_ghost = 0 (wall doesn't have AV)
+        # Q_face[0] = 0.5 * (Q_ghost + Q[0]) = 0.5 * Q[0]
+        Q_face[0] = 0.5 * Q[0]
+
+        # Right boundary: ghost cell has Q_ghost = 0
+        # Q_face[-1] = 0.5 * (Q[-1] + Q_ghost) = 0.5 * Q[-1]
+        Q_face[-1] = 0.5 * Q[-1]
+
+        # Interior faces: average of neighboring cells
         for i in range(1, n_cells):
             Q_face[i] = 0.5 * (Q[i - 1] + Q[i])
 
