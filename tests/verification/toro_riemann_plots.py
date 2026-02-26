@@ -4,10 +4,10 @@ Toro Riemann Problems - Exact vs Numerical Comparison
 Runs the full solver on all 5 Toro Riemann problems and compares
 numerical results to exact analytical solutions.
 
-Outputs:
+Outputs are saved to timestamped subdirectories with:
+- config.json: Test configuration for reproducibility
+- results.json: Test results summary
 - Individual plots for each test showing exact vs numerical
-- Summary comparison figure
-- Plots saved to tests/verification/output/
 
 Reference: [Toro2009] Section 4.3.3, Table 4.1
 """
@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
+import argparse
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -25,9 +26,12 @@ from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.core.state import create_riemann_state
 from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver, RiemannState
+from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosityConfig
 from lagrangian_solver.boundary.wall import SolidWallBC
 from lagrangian_solver.boundary.base import BoundarySide
 from lagrangian_solver.boundary.open import OpenBC
+
+from output_manager import create_output_manager, TestResult, OutputManager
 
 
 # Toro Table 4.1 test data
@@ -106,7 +110,9 @@ def run_toro_test(
     test_num: int,
     eos: IdealGasEOS,
     n_cells: int = N_CELLS,
+    cfl: float = 0.5,
     dt_min: float = None,
+    av_config: ArtificialViscosityConfig = None,
     verbose: bool = False,
 ):
     """
@@ -116,11 +122,13 @@ def run_toro_test(
         test_num: Toro test number (1-5)
         eos: Equation of state
         n_cells: Number of cells
+        cfl: CFL number
         dt_min: Minimum time step floor (None for no floor)
+        av_config: Artificial viscosity configuration (None to disable)
         verbose: Print progress
 
     Returns:
-        Tuple of (state, grid, statistics)
+        Tuple of (state, grid, statistics, failed, error_msg)
     """
     test_data = TORO_TESTS[test_num]
 
@@ -153,11 +161,12 @@ def run_toro_test(
 
     # Solver configuration with optional dt_min
     solver_config = SolverConfig(
-        cfl=0.5,
+        cfl=cfl,
         t_end=test_data["t_end"],
         dt_output=test_data["t_end"],
         dt_min=dt_min,
         verbose=verbose,
+        artificial_viscosity=av_config,
     )
 
     # Create solver
@@ -195,23 +204,37 @@ def run_toro_test(
     return solver.state, solver.grid, stats, failed, error_msg
 
 
-def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = None):
+def plot_toro_test_comparison(
+    test_num: int,
+    output_manager: OutputManager,
+    eos: IdealGasEOS,
+    n_cells: int = N_CELLS,
+    cfl: float = 0.5,
+    dt_min: float = None,
+    av_config: ArtificialViscosityConfig = None,
+):
     """
     Plot exact vs numerical comparison for a single Toro test.
 
     Args:
         test_num: Toro test number (1-5)
-        output_dir: Directory for output plots
+        output_manager: OutputManager for saving results
+        eos: Equation of state
+        n_cells: Number of cells
+        cfl: CFL number
         dt_min: Optional minimum time step floor
+        av_config: Artificial viscosity configuration
     """
     test_data = TORO_TESTS[test_num]
-    eos = IdealGasEOS(gamma=GAMMA)
 
     dt_min_str = f" (dt_min={dt_min:.0e})" if dt_min else ""
     print(f"Running Toro Test {test_num}: {test_data['name']}{dt_min_str}...")
 
     # Get numerical solution (may return partial results on failure)
-    state, grid, stats, failed, error_msg = run_toro_test(test_num, eos, dt_min=dt_min)
+    state, grid, stats, failed, error_msg = run_toro_test(
+        test_num, eos, n_cells=n_cells, cfl=cfl, dt_min=dt_min,
+        av_config=av_config
+    )
 
     if failed:
         print(f"  WARNING: Simulation failed at t={stats.final_time:.4e}: {error_msg}")
@@ -280,16 +303,24 @@ def plot_toro_test_comparison(test_num: int, output_dir: Path, dt_min: float = N
 
     plt.tight_layout()
 
-    # Save figure
-    output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_dtmin" if dt_min else ""
-    filename = f"toro_test_{test_num}_comparison{suffix}.png"
-    fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {filename}")
+    # Save figure using output manager
+    filename = f"toro_test_{test_num}.png"
+    output_manager.save_figure(fig, filename)
     print(f"    Steps: {stats.n_steps}, Wall time: {stats.wall_time:.2f}s, "
           f"Min dt: {stats.min_dt:.2e}")
 
     plt.close(fig)
+
+    # Record result
+    result = TestResult(
+        test_id=test_num,
+        steps=stats.n_steps,
+        wall_time=stats.wall_time,
+        final_time=stats.final_time,
+        failed=failed,
+        error_message=error_msg if error_msg else "",
+    )
+    output_manager.add_result(result)
 
     return x_num, rho_num, u_num, p_num, stats, failed
 
@@ -382,39 +413,120 @@ def create_all_tests_comparison(output_dir: Path):
     plt.close(fig)
 
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Run Toro Riemann problem verification tests"
+    )
+    parser.add_argument(
+        "--n-cells", type=int, default=N_CELLS,
+        help=f"Number of grid cells (default: {N_CELLS})"
+    )
+    parser.add_argument(
+        "--cfl", type=float, default=0.3,
+        help="CFL number (default: 0.3)"
+    )
+    parser.add_argument(
+        "--dt-min", type=float, default=1e-9,
+        help="Minimum time step floor (default: 1e-9)"
+    )
+    parser.add_argument(
+        "--av", action="store_true",
+        help="Enable artificial viscosity"
+    )
+    parser.add_argument(
+        "--av-linear", type=float, default=0.3,
+        help="AV linear coefficient (default: 0.3)"
+    )
+    parser.add_argument(
+        "--av-quad", type=float, default=2.0,
+        help="AV quadratic coefficient (default: 2.0)"
+    )
+    parser.add_argument(
+        "--description", type=str, default="",
+        help="Description for this test run"
+    )
+    parser.add_argument(
+        "--tests", type=str, default="1,2,3,4,5",
+        help="Comma-separated list of tests to run (default: 1,2,3,4,5)"
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main entry point."""
-    output_dir = Path(__file__).parent / "output"
+    args = parse_args()
+
+    # Parse test numbers
+    test_nums = [int(t.strip()) for t in args.tests.split(",")]
+
+    # Build description if not provided
+    if not args.description:
+        parts = ["first_order"]
+        if args.av:
+            parts = [f"av_clin{args.av_linear}_cq{args.av_quad}"]
+        args.description = "_".join(parts)
+
+    # Create artificial viscosity config if enabled
+    av_config = None
+    if args.av:
+        av_config = ArtificialViscosityConfig(
+            c_linear=args.av_linear,
+            c_quad=args.av_quad,
+        )
+
+    # Create output manager
+    output_manager = create_output_manager(
+        test_type="toro",
+        n_cells=args.n_cells,
+        cfl=args.cfl,
+        gamma=GAMMA,
+        description=args.description,
+        dt_min=args.dt_min,
+        av_enabled=args.av,
+        av_c_linear=args.av_linear if args.av else 0.0,
+        av_c_quad=args.av_quad if args.av else 0.0,
+    )
 
     print("=" * 70)
     print("TORO RIEMANN PROBLEM VERIFICATION - EXACT VS NUMERICAL")
     print("Reference: [Toro2009] Section 4.3.3, Table 4.1")
+    print("=" * 70)
+    print(f"Configuration: {args.description}")
+    print(f"  N_cells: {args.n_cells}, CFL: {args.cfl}, dt_min: {args.dt_min:.0e}")
+    if args.av:
+        print(f"  AV: c_linear={args.av_linear}, c_quad={args.av_quad}")
+    print(f"Output: {output_manager.output_dir}")
     print("=" * 70 + "\n")
 
-    # Run Tests 1-4 with dt_min floor
-    print("-" * 70)
-    print("TESTS 1-4 (dt_min = 1e-9)")
-    print("-" * 70)
-    for test_num in range(1, 5):
-        plot_toro_test_comparison(test_num, output_dir, dt_min=1e-9)
+    eos = IdealGasEOS(gamma=GAMMA)
 
-    # Test 5: Two shock collision
-    # NOTE: This test is challenging for pure Lagrangian methods because
-    # the converging shocks physically compress the material between them
-    # to near-zero thickness, causing cell collapse regardless of dt_min.
-    print("\n" + "-" * 70)
-    print("TEST 5 (Two Shock Collision, dt_min = 1e-9)")
-    print("-" * 70)
-    print("  NOTE: Test 5 may fail due to cell collapse from shock-shock")
-    print("  interaction. This is a fundamental Lagrangian limitation.")
-    plot_toro_test_comparison(5, output_dir, dt_min=1e-9)
+    # Run requested tests
+    for test_num in test_nums:
+        if test_num == 5:
+            print("\n" + "-" * 70)
+            print("TEST 5 (Two Shock Collision)")
+            print("-" * 70)
+            print("  NOTE: Test 5 may fail due to cell collapse from shock-shock")
+            print("  interaction. This is a fundamental Lagrangian limitation.")
+        else:
+            print("-" * 70)
+            print(f"TEST {test_num}")
+            print("-" * 70)
 
-    # Create summary comparison (uses standard CFL for all)
-    print("\n" + "-" * 70)
-    print("Creating summary comparison figure...")
-    create_all_tests_comparison(output_dir)
+        plot_toro_test_comparison(
+            test_num,
+            output_manager,
+            eos,
+            n_cells=args.n_cells,
+            cfl=args.cfl,
+            dt_min=args.dt_min,
+            av_config=av_config,
+        )
+        print()
 
-    print(f"\nAll plots saved to: {output_dir}")
+    # Print summary
+    output_manager.print_summary()
 
 
 if __name__ == "__main__":
