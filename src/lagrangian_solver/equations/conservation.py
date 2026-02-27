@@ -137,7 +137,14 @@ class CompatibleConservation:
         This guarantees exact total energy conservation because the
         internal energy equation uses the SAME stress as momentum.
 
-        Reference: Caramana et al. (1998), Burton (1992)
+        Ghost Cell Support:
+            If a BC provides ghost cell stress (via has_ghost_cell() and
+            get_interface_stress()), the momentum equation for the first
+            interior face uses the Riemann interface stress instead of
+            the interior cell stress. This gives correct wave dynamics
+            for shocks, rarefactions, and acoustic waves.
+
+        Reference: Caramana et al. (1998), Burton (1992), Toro (2009) Sec. 6.3
 
         Args:
             state: Current flow state
@@ -159,25 +166,61 @@ class CompatibleConservation:
         # 2. Cell-centered stress σ = p + Q
         sigma = self.compute_stress(state, grid)
 
-        # 3. Momentum rate at faces: du_j/dt = -(σ_j - σ_{j-1}) / dm_face_j
-        # Uses cell-centered stresses
+        # 3. Check for ghost cell BCs and compute interface stresses
+        sigma_left_interface = None
+        sigma_right_interface = None
+
+        if hasattr(bc_left, 'has_ghost_cell') and bc_left.has_ghost_cell():
+            # Compute interface state from boundary Riemann problem
+            bc_left.compute_interface_state(state, grid, t)
+            sigma_left_interface = bc_left.get_interface_stress()
+
+        if hasattr(bc_right, 'has_ghost_cell') and bc_right.has_ghost_cell():
+            bc_right.compute_interface_state(state, grid, t)
+            sigma_right_interface = bc_right.get_interface_stress()
+
+        # 4. Momentum rate at faces: du_j/dt = -(σ_j - σ_{j-1}) / dm_face_j
         d_u = np.zeros(state.n_faces)
 
-        # Interior faces: j = 1 to n_cells-1
-        for j in range(1, n_cells):
+        # Determine starting index for interior loop
+        j_start = 1
+
+        # Left boundary: use interface stress if available
+        if sigma_left_interface is not None and n_cells > 1:
+            # Face j=1: use interface stress on left, sigma[1] on right
+            dm_face = 0.5 * (dm[0] + dm[1])
+            d_u[1] = -(sigma[1] - sigma_left_interface) / dm_face
+            j_start = 2
+
+        # Interior faces: j = j_start to n_cells-1
+        j_end = n_cells
+        if sigma_right_interface is not None and n_cells > 1:
+            j_end = n_cells - 1
+
+        for j in range(j_start, j_end):
             dm_face = 0.5 * (dm[j - 1] + dm[j])
             d_u[j] = -(sigma[j] - sigma[j - 1]) / dm_face
 
+        # Right boundary: use interface stress if available
+        if sigma_right_interface is not None and n_cells > 1:
+            # Face j=n_cells-1: use sigma[-2] on left, interface stress on right
+            j = n_cells - 1
+            dm_face = 0.5 * (dm[j - 1] + dm[j])
+            d_u[j] = -(sigma_right_interface - sigma[j - 1]) / dm_face
+
         # Apply boundary conditions for d_u[0] and d_u[n_cells]
-        # Boundaries set their own momentum rates
+        # Boundaries set their own momentum rates at boundary faces
         bc_left.apply_momentum(state, grid, d_u, sigma, t)
         bc_right.apply_momentum(state, grid, d_u, sigma, t)
 
-        # 4. COMPATIBLE internal energy rate: de/dt = -σ * dτ/dt
-        # This is the key compatible relation - uses SAME stress as momentum
+        # 5. COMPATIBLE internal energy rate: de/dt = -σ * dτ/dt
+        # NOTE: Energy equation uses CELL stress, not interface stress.
+        # The ghost cell affects momentum (d_u), which affects d_tau,
+        # and energy follows via d_e = -sigma * d_tau.
+        # This maintains compatible energy discretization.
         d_e = -sigma * d_tau
 
-        # 5. Position rate: dx/dt = u
+        # 6. Position rate: dx/dt = u
         d_x = u.copy()
 
         return d_tau, d_u, d_e, d_x

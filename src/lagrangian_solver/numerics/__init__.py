@@ -17,6 +17,10 @@ from lagrangian_solver.numerics.artificial_viscosity import (
     ArtificialViscosity,
     ArtificialViscosityConfig,
 )
+from lagrangian_solver.numerics.boundary_riemann import (
+    BoundaryRiemannSolver,
+    BoundaryState,
+)
 
 __all__ = [
     "RiemannState",
@@ -30,4 +34,6 @@ __all__ = [
     "CompatibleSSPRK3Integrator",
     "ArtificialViscosity",
     "ArtificialViscosityConfig",
+    "BoundaryRiemannSolver",
+    "BoundaryState",
 ]

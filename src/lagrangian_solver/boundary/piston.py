@@ -509,3 +509,226 @@ def step_piston(v_before: float, v_after: float, t_step: float) -> VelocityProfi
         return v_before if t < t_step else v_after
 
     return velocity
+
+
+class RiemannGhostPistonBC(BoundaryCondition):
+    """
+    Moving piston BC using Riemann-based ghost cell.
+
+    GENERAL: Works for any wave type (shock, rarefaction, acoustic).
+
+    At each time step:
+    1. Solve boundary Riemann problem with interior state and u_piston
+    2. Get interface state (p*, ρ*, etc.) valid for any wave pattern
+    3. Use p* as ghost stress in momentum equation
+
+    This is physically correct because the Riemann solver finds
+    the exact wave structure connecting interior to boundary.
+
+    Key difference from CompatiblePistonBC:
+        - Solves full Riemann problem at boundary
+        - Uses Riemann solution pressure for momentum equation
+        - Handles shocks, rarefactions, and acoustic waves correctly
+
+    Reference: [Toro2009] Section 6.3
+    """
+
+    def __init__(
+        self,
+        side: BoundarySide,
+        eos: EOSBase,
+        velocity: Union[float, VelocityProfile],
+        tol: float = 1e-8,
+        thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
+        piston_temperature: Optional[float] = None,
+    ):
+        """
+        Initialize Riemann ghost cell piston BC.
+
+        Args:
+            side: Which side of the domain (LEFT or RIGHT)
+            eos: Equation of state
+            velocity: Piston velocity [m/s] or function v(t)
+            tol: Tolerance for Riemann solver iteration
+            thermal_bc: Type of thermal boundary condition
+            piston_temperature: Piston temperature [K] (for isothermal)
+        """
+        super().__init__(side, eos)
+
+        if callable(velocity):
+            self._velocity_func = velocity
+        else:
+            self._velocity_func = lambda t: velocity
+
+        self._tol = tol
+        self._thermal_bc = thermal_bc
+        self._piston_temperature = piston_temperature
+
+        # Import here to avoid circular imports
+        from lagrangian_solver.numerics.boundary_riemann import BoundaryRiemannSolver
+        self._boundary_solver = BoundaryRiemannSolver(eos, tol=tol)
+
+        # Cache interface state for use in momentum equation
+        self._interface_state = None
+
+    @property
+    def thermal_bc(self) -> ThermalBCType:
+        """Type of thermal boundary condition."""
+        return self._thermal_bc
+
+    @property
+    def piston_temperature(self) -> Optional[float]:
+        """Piston temperature for isothermal BC [K]."""
+        return self._piston_temperature
+
+    def get_boundary_velocity(self, t: float) -> float:
+        """Get piston velocity at time t."""
+        return self._velocity_func(t)
+
+    def compute_interface_state(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ):
+        """
+        Compute interface state by solving boundary Riemann problem.
+
+        This solves for the interface pressure p* such that the
+        Riemann solution has velocity u* = u_piston. Works for
+        any wave type (shock, rarefaction, acoustic).
+
+        The interior velocity used is from the first interior face (u[1] for
+        left boundary, u[-2] for right), NOT the boundary face itself.
+
+        Args:
+            state: Current flow state
+            grid: Lagrangian grid
+            t: Current time [s]
+
+        Returns:
+            BoundaryState at the interface
+        """
+        from lagrangian_solver.numerics.boundary_riemann import BoundaryState
+
+        v_piston = self._velocity_func(t)
+        idx = self.cell_index
+
+        # Interior state from adjacent cell
+        rho_int = state.rho[idx]
+        p_int = state.p[idx]
+
+        # Use the first interior face velocity, NOT the boundary face.
+        # The boundary face velocity is set to piston velocity, so including
+        # it would give wrong results.
+        if self._side == BoundarySide.LEFT:
+            # For left boundary: interior is cell 0, use face 1 velocity
+            u_int = state.u[1]
+            self._interface_state = self._boundary_solver.solve_left_boundary(
+                rho_int, u_int, p_int, v_piston
+            )
+        else:
+            # For right boundary: interior is cell -1, use face -2 velocity
+            u_int = state.u[-2]
+            self._interface_state = self._boundary_solver.solve_right_boundary(
+                rho_int, u_int, p_int, v_piston
+            )
+
+        return self._interface_state
+
+    def apply_velocity(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """
+        Set face velocity to piston velocity.
+
+        This is called before computing the RHS.
+        """
+        v_piston = self._velocity_func(t)
+        state.u[self.face_index] = v_piston
+
+    def apply_momentum(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        d_u: np.ndarray,
+        sigma: np.ndarray,
+        t: float,
+    ) -> None:
+        """
+        Apply momentum BC at piston face.
+
+        For constant velocity piston: d_u = 0
+        For accelerating piston: d_u = dv_piston/dt
+        """
+        # Finite difference for piston acceleration
+        dt_check = 1e-8
+        v_now = self._velocity_func(t)
+        v_later = self._velocity_func(t + dt_check)
+        dv_dt = (v_later - v_now) / dt_check
+
+        d_u[self.face_index] = dv_dt
+
+    def get_interface_stress(self) -> float:
+        """
+        Get interface stress for momentum equation.
+
+        This returns the Riemann solution pressure p*, which is
+        the correct interface pressure for any wave type.
+        """
+        if self._interface_state is None:
+            raise RuntimeError(
+                "Interface state not computed. Call compute_interface_state first."
+            )
+        return self._interface_state.sigma
+
+    def has_ghost_cell(self) -> bool:
+        """
+        Indicate this BC provides ghost cell stress.
+
+        Used by conservation equations to detect ghost cell BCs.
+        """
+        return True
+
+    @property
+    def interface_state(self):
+        """Access the computed interface state (for diagnostics)."""
+        return self._interface_state
+
+    # Legacy interface for backward compatibility
+    def apply(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """LEGACY: Use apply_velocity() instead."""
+        self.apply_velocity(state, grid, t)
+
+    def compute_flux(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> BoundaryFlux:
+        """
+        LEGACY: Compute numerical flux at moving piston.
+
+        For Riemann ghost BC, use compute_interface_state() instead.
+        """
+        v_piston = self._velocity_func(t)
+
+        # Compute interface state if not already done
+        if self._interface_state is None:
+            self.compute_interface_state(state, grid, t)
+
+        p_star = self._interface_state.p
+
+        return BoundaryFlux(
+            p_flux=p_star,
+            pu_flux=p_star * v_piston,
+            u_flux=v_piston,
+        )
