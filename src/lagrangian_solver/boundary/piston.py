@@ -52,8 +52,16 @@ class CompatiblePistonBC(BoundaryCondition):
     NOT from a Riemann solver. This ensures consistency with the
     cell-centered stress discretization.
 
+    Automatic Velocity Ramping:
+        By default, the piston velocity ramps up over 30 microseconds to
+        prevent excessive artificial viscosity heating at the boundary
+        during shock formation. This can be disabled by setting ramp_time=0.
+
     Reference: Toro (2009) Chapter 3, GDTk L1D solver
     """
+
+    # Default ramp time for smooth shock formation (30 microseconds)
+    DEFAULT_RAMP_TIME = 30e-6
 
     def __init__(
         self,
@@ -62,6 +70,7 @@ class CompatiblePistonBC(BoundaryCondition):
         velocity: Union[float, VelocityProfile],
         thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
         piston_temperature: Optional[float] = None,
+        ramp_time: Optional[float] = None,
     ):
         """
         Initialize compatible piston boundary condition.
@@ -73,14 +82,27 @@ class CompatiblePistonBC(BoundaryCondition):
                       Positive = moving right, Negative = moving left
             thermal_bc: Type of thermal boundary condition
             piston_temperature: Piston temperature [K] (for isothermal)
+            ramp_time: Time to ramp velocity from 0 to target [s].
+                      Default is 30e-6 (30 microseconds) to prevent
+                      excessive AV heating during shock formation.
+                      Set to 0 to disable ramping.
         """
         super().__init__(side, eos)
 
-        # Velocity profile
+        # Set ramp time (default 30 us for smooth shock formation)
+        self._ramp_time = ramp_time if ramp_time is not None else self.DEFAULT_RAMP_TIME
+
+        # Velocity profile with optional ramping
         if callable(velocity):
-            self._velocity_func = velocity
+            self._base_velocity_func = velocity
         else:
-            self._velocity_func = lambda t: velocity
+            self._base_velocity_func = lambda t: velocity
+
+        # Apply ramping if ramp_time > 0
+        if self._ramp_time > 0:
+            self._velocity_func = self._create_ramped_velocity()
+        else:
+            self._velocity_func = self._base_velocity_func
 
         self._thermal_bc = thermal_bc
         self._piston_temperature = piston_temperature
@@ -90,6 +112,26 @@ class CompatiblePistonBC(BoundaryCondition):
 
         # Store computed wall pressure for diagnostics
         self._p_wall = None
+
+    def _create_ramped_velocity(self) -> VelocityProfile:
+        """Create velocity profile with linear ramp-up."""
+        t_ramp = self._ramp_time
+        base_func = self._base_velocity_func
+
+        def ramped_velocity(t: float) -> float:
+            v_target = base_func(t)
+            if t < t_ramp:
+                # Linear ramp from 0 to v_target
+                return v_target * (t / t_ramp)
+            else:
+                return v_target
+
+        return ramped_velocity
+
+    @property
+    def ramp_time(self) -> float:
+        """Velocity ramp-up time [s]."""
+        return self._ramp_time
 
     @property
     def thermal_bc(self) -> ThermalBCType:
@@ -400,6 +442,9 @@ class MovingPistonBC(CompatiblePistonBC):
 
     NOTE: This now uses the compatible discretization interface.
     If you need the old Riemann-based BC, see the git history.
+
+    Features automatic velocity ramping (default 30us) to prevent
+    excessive AV heating at boundaries during shock formation.
     """
 
     def __init__(
@@ -409,6 +454,7 @@ class MovingPistonBC(CompatiblePistonBC):
         velocity: Union[float, VelocityProfile],
         thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
         piston_temperature: Optional[float] = None,
+        ramp_time: Optional[float] = None,
         porous: bool = False,
         permeability: float = 0.0,
         slip_coefficient: float = 0.0,
@@ -416,8 +462,18 @@ class MovingPistonBC(CompatiblePistonBC):
         """
         Initialize moving piston BC.
 
-        NOTE: porous parameters are deprecated and ignored in the
-        compatible discretization. Use a specialized porous BC if needed.
+        Args:
+            side: Which side of the domain (LEFT or RIGHT)
+            eos: Equation of state
+            velocity: Piston velocity [m/s] or function v(t)
+            thermal_bc: Type of thermal boundary condition
+            piston_temperature: Piston temperature [K] (for isothermal)
+            ramp_time: Time to ramp velocity from 0 to target [s].
+                      Default is 30e-6 (30 microseconds).
+                      Set to 0 to disable ramping.
+            porous: DEPRECATED - ignored
+            permeability: DEPRECATED - ignored
+            slip_coefficient: DEPRECATED - ignored
         """
         if porous:
             import warnings
@@ -434,6 +490,7 @@ class MovingPistonBC(CompatiblePistonBC):
             velocity=velocity,
             thermal_bc=thermal_bc,
             piston_temperature=piston_temperature,
+            ramp_time=ramp_time,
         )
 
 
@@ -519,7 +576,7 @@ class RiemannGhostPistonBC(BoundaryCondition):
 
     At each time step:
     1. Solve boundary Riemann problem with interior state and u_piston
-    2. Get interface state (p*, ρ*, etc.) valid for any wave pattern
+    2. Get interface state (p*, rho*, etc.) valid for any wave pattern
     3. Use p* as ghost stress in momentum equation
 
     This is physically correct because the Riemann solver finds
@@ -530,8 +587,14 @@ class RiemannGhostPistonBC(BoundaryCondition):
         - Uses Riemann solution pressure for momentum equation
         - Handles shocks, rarefactions, and acoustic waves correctly
 
+    Features automatic velocity ramping (default 30us) to prevent
+    excessive AV heating at boundaries during shock formation.
+
     Reference: [Toro2009] Section 6.3
     """
+
+    # Default ramp time for smooth shock formation (30 microseconds)
+    DEFAULT_RAMP_TIME = 30e-6
 
     def __init__(
         self,
@@ -541,6 +604,7 @@ class RiemannGhostPistonBC(BoundaryCondition):
         tol: float = 1e-8,
         thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
         piston_temperature: Optional[float] = None,
+        ramp_time: Optional[float] = None,
     ):
         """
         Initialize Riemann ghost cell piston BC.
@@ -552,13 +616,26 @@ class RiemannGhostPistonBC(BoundaryCondition):
             tol: Tolerance for Riemann solver iteration
             thermal_bc: Type of thermal boundary condition
             piston_temperature: Piston temperature [K] (for isothermal)
+            ramp_time: Time to ramp velocity from 0 to target [s].
+                      Default is 30e-6 (30 microseconds).
+                      Set to 0 to disable ramping.
         """
         super().__init__(side, eos)
 
+        # Set ramp time (default 30 us for smooth shock formation)
+        self._ramp_time = ramp_time if ramp_time is not None else self.DEFAULT_RAMP_TIME
+
+        # Base velocity function
         if callable(velocity):
-            self._velocity_func = velocity
+            self._base_velocity_func = velocity
         else:
-            self._velocity_func = lambda t: velocity
+            self._base_velocity_func = lambda t: velocity
+
+        # Apply ramping if ramp_time > 0
+        if self._ramp_time > 0:
+            self._velocity_func = self._create_ramped_velocity()
+        else:
+            self._velocity_func = self._base_velocity_func
 
         self._tol = tol
         self._thermal_bc = thermal_bc
@@ -570,6 +647,25 @@ class RiemannGhostPistonBC(BoundaryCondition):
 
         # Cache interface state for use in momentum equation
         self._interface_state = None
+
+    def _create_ramped_velocity(self) -> VelocityProfile:
+        """Create velocity profile with linear ramp-up."""
+        t_ramp = self._ramp_time
+        base_func = self._base_velocity_func
+
+        def ramped_velocity(t: float) -> float:
+            v_target = base_func(t)
+            if t < t_ramp:
+                return v_target * (t / t_ramp)
+            else:
+                return v_target
+
+        return ramped_velocity
+
+    @property
+    def ramp_time(self) -> float:
+        """Velocity ramp-up time [s]."""
+        return self._ramp_time
 
     @property
     def thermal_bc(self) -> ThermalBCType:
