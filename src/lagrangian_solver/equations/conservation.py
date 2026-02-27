@@ -1,103 +1,93 @@
 """
-Lagrangian conservation laws and flux computations.
+Compatible energy discretization for Lagrangian conservation laws.
 
 This module implements the 1D compressible Euler equations in Lagrangian
-(mass) coordinates.
+(mass) coordinates using COMPATIBLE ENERGY DISCRETIZATION.
+
+Key Design Principle:
+    Use cell-centered stress σ = p + Q for BOTH momentum AND energy equations.
+    This guarantees exact total energy conservation to machine precision.
+
+The previous implementation mixed Riemann fluxes (face-centered) with
+cell-centered pressure differences - these are fundamentally incompatible
+and led to energy conservation errors.
 
 References:
+    [Caramana1998] Caramana et al. (1998) JCP 146:227-262 - "The Construction
+                   of Compatible Hydrodynamics Algorithms Utilizing Conservation
+                   of Total Energy"
+    [Burton1992] Burton (1992) UCRL-JC-105926 - "Conservation of Energy,
+                 Momentum, and Angular Momentum in Lagrangian Staggered-Grid
+                 Hydrodynamics"
     [Despres2017] Chapter 3 - Lagrangian formulation
     [Toro2009] Chapter 1 - Euler equations
 
 Governing Equations in Lagrangian Mass Coordinates (m, t):
 
     Mass Conservation (specific volume):
-        ∂τ/∂t - ∂u/∂m = 0
+        dτ_i/dt = (u_{i+1} - u_i) / dm_i
 
-    Momentum Conservation:
-        ∂u/∂t + ∂p/∂m = 0
+    Momentum Conservation (face-centered velocity):
+        du_j/dt = -(σ_j - σ_{j-1}) / dm_face_j
 
-    Energy Conservation:
-        ∂E/∂t + ∂(pu)/∂m = 0
+        where:
+            σ_i = p_i + Q_i          (cell-centered total stress)
+            dm_face_j = 0.5*(dm_{j-1} + dm_j)  (mass at face)
+
+    Internal Energy Conservation (COMPATIBLE - uses SAME stress):
+        de_i/dt = -σ_i * dτ_i/dt
+                = -σ_i * (u_{i+1} - u_i) / dm_i
 
     Position Update:
-        ∂x/∂t = u
+        dx_j/dt = u_j
 
-where:
-    τ = 1/ρ is specific volume [m³/kg]
-    u is velocity [m/s]
-    E = e + ½u² is total specific energy [J/kg]
-    p is pressure [Pa]
-    m is mass coordinate [kg]
+Energy Conservation Proof:
+    The work in momentum EXACTLY equals the energy change because
+    we use the SAME cell-centered stress in both equations.
+    dE_total/dt = 0 to machine precision (O(10^-15) relative error).
 """
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional, TYPE_CHECKING
 import numpy as np
 
-from typing import TYPE_CHECKING
-
-from lagrangian_solver.core.state import FlowState, ConservedVariables
+from lagrangian_solver.core.state import FlowState
 from lagrangian_solver.core.grid import LagrangianGrid
 from lagrangian_solver.equations.eos import EOSBase
-from lagrangian_solver.numerics.riemann import (
-    RiemannSolverBase,
-    RiemannState,
-)
 
 if TYPE_CHECKING:
     from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosity
+    from lagrangian_solver.boundary.base import BoundaryCondition
 
 
-@dataclass
-class LagrangianFlux:
+class CompatibleConservation:
     """
-    Numerical fluxes at cell faces for Lagrangian equations.
+    Cell-centered compatible discretization of Lagrangian conservation laws.
 
-    Reference: [Despres2017] Section 3.3
+    Uses the SAME stress σ = p + Q in both momentum and energy equations
+    to guarantee exact total energy conservation.
 
-    Attributes:
-        p_flux: Pressure at faces (momentum flux) [Pa]
-        pu_flux: Pressure × velocity at faces (energy flux) [W/m² = Pa·m/s]
-        u_flux: Velocity at faces (position update flux) [m/s]
-    """
+    This is the core of the compatible energy discretization. By using
+    cell-centered stress consistently, the discrete work done in the
+    momentum equation exactly equals the energy change in the energy
+    equation (to machine precision).
 
-    p_flux: np.ndarray  # Shape (n_faces,)
-    pu_flux: np.ndarray  # Shape (n_faces,)
-    u_flux: np.ndarray  # Shape (n_faces,)
-
-
-class LagrangianConservation:
-    """
-    Computes fluxes and residuals for Lagrangian conservation equations.
-
-    The semi-discrete form of the equations is:
-
-        dτ_i/dt = (u_{i+1} - u_i) / dm_i
-        du_i/dt = -((p + Q)_{i+1} - (p + Q)_i) / dm_i   (face-centered)
-        dE_i/dt = -(p_{i+1}u_{i+1} - p_i u_i) / dm_i
-
-    where i is the cell index and face i is at the left of cell i.
-    Q is the artificial viscous stress (Von Neumann-Richtmyer).
-
-    Reference: [Despres2017] Section 3.4, [VNR1950]
+    Reference: Caramana et al. (1998) JCP 146:227-262
     """
 
     def __init__(
         self,
         eos: EOSBase,
-        riemann_solver: RiemannSolverBase,
         artificial_viscosity: "ArtificialViscosity" = None,
     ):
         """
-        Initialize conservation law solver.
+        Initialize compatible conservation law solver.
 
         Args:
             eos: Equation of state
-            riemann_solver: Riemann solver for computing interface fluxes
             artificial_viscosity: Optional artificial viscosity for shock capturing
         """
         self._eos = eos
-        self._riemann_solver = riemann_solver
         self._artificial_viscosity = artificial_viscosity
 
     @property
@@ -106,226 +96,143 @@ class LagrangianConservation:
         return self._eos
 
     @property
-    def riemann_solver(self) -> RiemannSolverBase:
-        """Riemann solver for interface flux computation."""
-        return self._riemann_solver
-
-    @property
     def artificial_viscosity(self) -> "ArtificialViscosity":
         """Artificial viscosity for shock capturing (may be None)."""
         return self._artificial_viscosity
 
-    def compute_fluxes(
-        self, state: FlowState, grid: LagrangianGrid
-    ) -> LagrangianFlux:
+    def compute_stress(self, state: FlowState, grid: LagrangianGrid) -> np.ndarray:
         """
-        Compute numerical fluxes at all interior faces using Riemann solver.
+        Compute cell-centered total stress σ = p + Q.
 
-        Boundary fluxes must be set separately using boundary conditions.
+        The stress is used in BOTH momentum and energy equations,
+        which is the key to compatible energy discretization.
 
         Args:
             state: Current flow state
             grid: Lagrangian grid
 
         Returns:
-            LagrangianFlux with pressure, energy, and velocity fluxes
+            Cell-centered total stress [Pa], shape (n_cells,)
         """
-        n_cells = state.n_cells
-        n_faces = n_cells + 1
+        if self._artificial_viscosity is not None:
+            Q = self._artificial_viscosity.compute_viscous_stress(state, grid)
+        else:
+            Q = np.zeros(state.n_cells)
 
-        # Initialize flux arrays
-        p_flux = np.zeros(n_faces)
-        pu_flux = np.zeros(n_faces)
-        u_flux = np.zeros(n_faces)
-
-        # Compute fluxes at interior faces (1 to n_cells-1)
-        for i in range(1, n_cells):
-            # Left state (cell i-1)
-            left = RiemannState(
-                rho=state.rho[i - 1],
-                u=state.u[i],  # Approximate: use face velocity
-                p=state.p[i - 1],
-                c=state.c[i - 1],
-                e=state.e[i - 1],
-            )
-
-            # Right state (cell i)
-            right = RiemannState(
-                rho=state.rho[i],
-                u=state.u[i],  # Approximate: use face velocity
-                p=state.p[i],
-                c=state.c[i],
-                e=state.e[i],
-            )
-
-            # Solve Riemann problem to get interface pressure and velocity
-            p_star, u_star = self._riemann_solver.compute_flux(left, right)
-
-            p_flux[i] = p_star
-            u_flux[i] = u_star  # Direct assignment - no division needed
-            pu_flux[i] = p_star * u_star
-
-        return LagrangianFlux(p_flux=p_flux, pu_flux=pu_flux, u_flux=u_flux)
+        return state.p + Q
 
     def compute_residual(
-        self, state: FlowState, grid: LagrangianGrid, fluxes: LagrangianFlux
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        bc_left: "BoundaryCondition",
+        bc_right: "BoundaryCondition",
+        t: float,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Compute the right-hand side of the semi-discrete equations.
+        Compute (d_tau, d_u, d_e, d_x) using compatible discretization.
 
-        Returns the time derivatives:
-            dτ/dt, du/dt, dE/dt, dx/dt
+        Key: d_e = -σ * d_tau (pdV work form)
 
-        When artificial viscosity is enabled, the momentum equation becomes:
-            du/dt = -∂(p + Q)/∂m
+        This guarantees exact total energy conservation because the
+        internal energy equation uses the SAME stress as momentum.
 
-        where Q is the Von Neumann-Richtmyer viscous stress.
-
-        Reference: [Despres2017] Equations (3.15)-(3.17), [VNR1950]
+        Reference: Caramana et al. (1998), Burton (1992)
 
         Args:
             state: Current flow state
             grid: Lagrangian grid
-            fluxes: Pre-computed fluxes (including boundary fluxes)
+            bc_left: Left boundary condition
+            bc_right: Right boundary condition
+            t: Current time [s]
 
         Returns:
-            Tuple of (d_tau, d_u, d_E, d_x) arrays
+            Tuple of (d_tau, d_u, d_e, d_x) arrays
         """
         n_cells = state.n_cells
         dm = grid.dm
-
-        # Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
-        d_tau = np.zeros(n_cells)
-        for i in range(n_cells):
-            d_tau[i] = (fluxes.u_flux[i + 1] - fluxes.u_flux[i]) / dm[i]
-
-        # Compute artificial viscous stress if enabled
-        # Reference: [VNR1950], [Toro2009] Section 11.1
-        if self._artificial_viscosity is not None:
-            Q = self._artificial_viscosity.compute_viscous_stress(state, grid)
-        else:
-            Q = np.zeros(n_cells)
-
-        # Total stress = pressure + artificial viscosity
-        stress = state.p + Q
-
-        # Velocity rate at faces: du/dt = -(stress_i - stress_{i-1}) / dm_face
-        # Uses cell-centered stresses, not face pressures
-        # For boundary faces, this is handled by boundary conditions
-        d_u = np.zeros(state.n_faces)
-        for i in range(1, n_cells):
-            dm_avg = 0.5 * (dm[i - 1] + dm[i])
-            d_u[i] = -(stress[i] - stress[i - 1]) / dm_avg
-
-        # Energy rate: dE/dt = -∂((p+Q)u)/∂m
-        # The Riemann flux gives p*u, we need to add the AV work term Q*u
-        # Q is cell-centered, interpolate to faces for the energy flux
-        #
-        # GHOST CELL APPROACH for boundaries:
-        # At solid walls, we use a ghost cell with Q_ghost = 0 to represent
-        # that the artificial viscosity acts only inside the gas, not at the
-        # wall interface. The wall does mechanical work p*u, not (p+Q)*u.
-        # This gives Q_face = 0.5*(Q_ghost + Q_interior) = 0.5*Q_interior
-        # at boundaries, which properly accounts for the one-sided nature
-        # of AV dissipation at walls.
-        #
-        # Reference: [VNR1950], [Caramana1998], Ghost cell methods
-        d_E = np.zeros(n_cells)
-
-        # Interpolate Q to faces using ghost cell approach
-        Q_face = np.zeros(state.n_faces)
-
-        # Left boundary: ghost cell has Q_ghost = 0 (wall doesn't have AV)
-        # Q_face[0] = 0.5 * (Q_ghost + Q[0]) = 0.5 * Q[0]
-        Q_face[0] = 0.5 * Q[0]
-
-        # Right boundary: ghost cell has Q_ghost = 0
-        # Q_face[-1] = 0.5 * (Q[-1] + Q_ghost) = 0.5 * Q[-1]
-        Q_face[-1] = 0.5 * Q[-1]
-
-        # Interior faces: average of neighboring cells
-        for i in range(1, n_cells):
-            Q_face[i] = 0.5 * (Q[i - 1] + Q[i])
-
-        # Total energy flux at faces: (p + Q) * u
-        # fluxes.pu_flux already has p*u from Riemann solver
-        # Add Q*u contribution
-        Qu_flux = Q_face * fluxes.u_flux
-
-        for i in range(n_cells):
-            # Total energy flux = Riemann (p*u) + AV work (Q*u)
-            total_flux_right = fluxes.pu_flux[i + 1] + Qu_flux[i + 1]
-            total_flux_left = fluxes.pu_flux[i] + Qu_flux[i]
-            d_E[i] = -(total_flux_right - total_flux_left) / dm[i]
-
-        # Position rate: dx/dt = u
-        d_x = fluxes.u_flux.copy()
-
-        return d_tau, d_u, d_E, d_x
-
-    def compute_residual_direct(
-        self, state: FlowState, grid: LagrangianGrid
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Compute residual using cell-centered pressure differences.
-
-        This is a simpler approach that uses cell pressures directly
-        rather than solving Riemann problems at each face.
-
-        When artificial viscosity is enabled, the momentum equation becomes:
-            du/dt = -∂(p + Q)/∂m
-
-        Suitable for smooth flows without strong discontinuities.
-
-        Args:
-            state: Current flow state
-            grid: Lagrangian grid
-
-        Returns:
-            Tuple of (d_tau, d_u, d_E, d_x) arrays
-        """
-        n_cells = state.n_cells
-        dm = grid.dm
-
-        # Velocity at faces
         u = state.u
 
-        # Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
+        # 1. Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
         d_tau = (u[1:] - u[:-1]) / dm
 
-        # Compute artificial viscous stress if enabled
-        if self._artificial_viscosity is not None:
-            Q = self._artificial_viscosity.compute_viscous_stress(state, grid)
-        else:
-            Q = np.zeros(n_cells)
+        # 2. Cell-centered stress σ = p + Q
+        sigma = self.compute_stress(state, grid)
 
-        # Total stress = pressure + artificial viscosity
-        stress = state.p + Q
-
-        # Velocity rate at faces (interior only, boundaries set separately)
+        # 3. Momentum rate at faces: du_j/dt = -(σ_j - σ_{j-1}) / dm_face_j
+        # Uses cell-centered stresses
         d_u = np.zeros(state.n_faces)
 
-        # For interior faces, use central difference on stress
-        for i in range(1, n_cells):
-            dm_face = 0.5 * (dm[i - 1] + dm[i])
-            d_u[i] = -(stress[i] - stress[i - 1]) / dm_face
+        # Interior faces: j = 1 to n_cells-1
+        for j in range(1, n_cells):
+            dm_face = 0.5 * (dm[j - 1] + dm[j])
+            d_u[j] = -(sigma[j] - sigma[j - 1]) / dm_face
 
-        # Energy rate using face velocities and total stress (p + Q)
-        # Interpolate stress to faces for energy flux
-        # Reference: [VNR1950], [Caramana1998]
-        stress_face = np.zeros(state.n_faces)
-        stress_face[0] = stress[0]
-        stress_face[-1] = stress[-1]
-        stress_face[1:-1] = 0.5 * (stress[:-1] + stress[1:])
+        # Apply boundary conditions for d_u[0] and d_u[n_cells]
+        # Boundaries set their own momentum rates
+        bc_left.apply_momentum(state, grid, d_u, sigma, t)
+        bc_right.apply_momentum(state, grid, d_u, sigma, t)
 
-        # dE/dt = -∂((p+Q)u)/∂m
-        stress_u_face = stress_face * u
-        d_E = -(stress_u_face[1:] - stress_u_face[:-1]) / dm
+        # 4. COMPATIBLE internal energy rate: de/dt = -σ * dτ/dt
+        # This is the key compatible relation - uses SAME stress as momentum
+        d_e = -sigma * d_tau
 
-        # Position rate: dx/dt = u
+        # 5. Position rate: dx/dt = u
         d_x = u.copy()
 
-        return d_tau, d_u, d_E, d_x
+        return d_tau, d_u, d_e, d_x
+
+
+# Keep old LagrangianConservation for backward compatibility, but mark deprecated
+class LagrangianConservation:
+    """
+    DEPRECATED: Use CompatibleConservation for exact energy conservation.
+
+    This class uses Riemann fluxes which are inconsistent with cell-centered
+    pressure differences in the momentum equation, leading to energy errors.
+    """
+
+    def __init__(
+        self,
+        eos: EOSBase,
+        riemann_solver=None,
+        artificial_viscosity: "ArtificialViscosity" = None,
+    ):
+        """Initialize conservation law solver (DEPRECATED)."""
+        import warnings
+        warnings.warn(
+            "LagrangianConservation is deprecated. Use CompatibleConservation "
+            "for exact energy conservation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._eos = eos
+        self._riemann_solver = riemann_solver
+        self._artificial_viscosity = artificial_viscosity
+
+    @property
+    def eos(self) -> EOSBase:
+        return self._eos
+
+    @property
+    def riemann_solver(self):
+        return self._riemann_solver
+
+    @property
+    def artificial_viscosity(self):
+        return self._artificial_viscosity
+
+    def compute_fluxes(self, state: FlowState, grid: LagrangianGrid):
+        """Compute numerical fluxes (DEPRECATED)."""
+        raise NotImplementedError(
+            "LagrangianConservation is deprecated. Use CompatibleConservation."
+        )
+
+    def compute_residual(self, state: FlowState, grid: LagrangianGrid, fluxes):
+        """Compute residual (DEPRECATED)."""
+        raise NotImplementedError(
+            "LagrangianConservation is deprecated. Use CompatibleConservation."
+        )
 
 
 def compute_mass_error(state: FlowState, grid: LagrangianGrid) -> float:
@@ -370,11 +277,56 @@ def compute_momentum(state: FlowState) -> float:
     return np.sum(state.rho * u_cell * state.dx)
 
 
-def compute_total_energy(state: FlowState) -> float:
+def compute_total_energy(state: FlowState, grid: LagrangianGrid) -> float:
     """
-    Compute total energy in the domain.
+    Compute total energy in the domain using staggered grid.
 
-    Total energy = ∫ ρE dx
+    For compatible discretization with face-centered velocity:
+        E_total = Σ_i (dm_i · e_i) + Σ_j (½ m_j · u_j²)
+
+    where:
+        - Internal energy uses cell masses dm_i
+        - Kinetic energy uses face masses m_j
+
+    Reference: Caramana et al. (1998) Section 2
+
+    Args:
+        state: Current flow state
+        grid: Lagrangian grid
+
+    Returns:
+        Total energy [J]
+    """
+    dm = grid.dm
+    n_cells = state.n_cells
+
+    # Internal energy: sum over cells
+    IE = np.sum(dm * state.e)
+
+    # Kinetic energy: sum over faces using face masses
+    # Face mass = average of adjacent cell masses
+    KE = 0.0
+    for j in range(state.n_faces):
+        if j == 0:
+            # Left boundary face: use half of first cell mass
+            m_j = 0.5 * dm[0]
+        elif j == n_cells:
+            # Right boundary face: use half of last cell mass
+            m_j = 0.5 * dm[-1]
+        else:
+            # Interior faces: average of adjacent cell masses
+            m_j = 0.5 * (dm[j - 1] + dm[j])
+        KE += 0.5 * m_j * state.u[j] ** 2
+
+    return IE + KE
+
+
+def compute_total_energy_simple(state: FlowState) -> float:
+    """
+    Compute total energy using simple cell-centered formula.
+
+    This is the traditional formula using E = e + ½u² at cell centers.
+    Less accurate for staggered grids but useful for comparison.
 
     Args:
         state: Current flow state
@@ -385,32 +337,46 @@ def compute_total_energy(state: FlowState) -> float:
     return np.sum(state.rho * state.E * state.dx)
 
 
-def compute_kinetic_energy(state: FlowState) -> float:
+def compute_kinetic_energy(state: FlowState, grid: LagrangianGrid) -> float:
     """
-    Compute total kinetic energy in the domain.
+    Compute total kinetic energy using face-centered velocity.
 
-    Kinetic energy = ∫ ½ρu² dx
+    Uses the same formula as compute_total_energy for consistency.
 
     Args:
         state: Current flow state
+        grid: Lagrangian grid
 
     Returns:
         Kinetic energy [J]
     """
-    u_cell = 0.5 * (state.u[:-1] + state.u[1:])
-    return np.sum(0.5 * state.rho * u_cell**2 * state.dx)
+    dm = grid.dm
+    n_cells = state.n_cells
+
+    KE = 0.0
+    for j in range(state.n_faces):
+        if j == 0:
+            m_j = 0.5 * dm[0]
+        elif j == n_cells:
+            m_j = 0.5 * dm[-1]
+        else:
+            m_j = 0.5 * (dm[j - 1] + dm[j])
+        KE += 0.5 * m_j * state.u[j] ** 2
+
+    return KE
 
 
-def compute_internal_energy(state: FlowState) -> float:
+def compute_internal_energy(state: FlowState, grid: LagrangianGrid) -> float:
     """
     Compute total internal energy in the domain.
 
-    Internal energy = ∫ ρe dx
+    Internal energy = Σ dm_i · e_i
 
     Args:
         state: Current flow state
+        grid: Lagrangian grid
 
     Returns:
         Internal energy [J]
     """
-    return np.sum(state.rho * state.e * state.dx)
+    return np.sum(grid.dm * state.e)

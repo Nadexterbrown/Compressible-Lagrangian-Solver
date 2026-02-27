@@ -201,6 +201,93 @@ class FlowState:
         )
 
     @classmethod
+    def from_internal_energy(
+        cls,
+        tau: np.ndarray,
+        u: np.ndarray,
+        e: np.ndarray,
+        x: np.ndarray,
+        m: np.ndarray,
+        eos: EOSBase,
+        enforce_positivity: bool = True,
+    ) -> "FlowState":
+        """
+        Construct a FlowState from internal energy (compatible discretization).
+
+        This is the primary constructor for compatible energy discretization.
+        Internal energy e is the PRIMARY evolved variable - NO subtraction
+        e = E - KE is performed. Total energy E is DERIVED for diagnostics only.
+
+        This guarantees that energy errors are not amplified by subtraction
+        of two large quantities (E and KE) to get a small one (e).
+
+        Reference: Caramana et al. (1998) JCP 146:227-262
+
+        Args:
+            tau: Specific volume (cell-centered) [m³/kg]
+            u: Velocity (face-centered) [m/s]
+            e: Specific internal energy (cell-centered) [J/kg] - PRIMARY
+            x: Face positions [m]
+            m: Cumulative mass at faces [kg]
+            eos: Equation of state for computing thermodynamic properties
+            enforce_positivity: If True, clip non-physical values
+
+        Returns:
+            Complete FlowState with all derived quantities
+        """
+        tau = tau.copy()
+        u = u.copy()
+        e = e.copy()
+
+        n_cells = len(tau)
+
+        # Positivity enforcement
+        if enforce_positivity:
+            tau_min = 1e-10
+            tau = np.maximum(tau, tau_min)
+
+        # Compute density from specific volume
+        rho = 1.0 / tau
+
+        # Use EOS to get pressure, temperature, sound speed from (rho, e)
+        p = eos.pressure(rho, e)
+
+        # Ensure positive pressure
+        if enforce_positivity:
+            p_min = 1e-10
+            p = np.maximum(p, p_min)
+
+        T = eos.temperature(rho, e)
+        c = eos.sound_speed(rho, p)
+        gamma = eos.get_gamma(rho, p)
+        s = eos.entropy(rho, p)
+
+        # Cell-averaged velocity for kinetic energy
+        u_cell = 0.5 * (u[:-1] + u[1:])
+
+        # Total energy is DERIVED (for diagnostics only)
+        E = e + 0.5 * u_cell**2
+
+        # Compute cell masses
+        dm = np.diff(m)
+
+        return cls(
+            tau=tau,
+            rho=rho,
+            p=p,
+            T=T,
+            e=e,
+            E=E,
+            c=c,
+            gamma=gamma,
+            s=s,
+            x=x,
+            u=u,
+            m=m,
+            dm=dm,
+        )
+
+    @classmethod
     def from_conserved(
         cls,
         conserved: ConservedVariables,

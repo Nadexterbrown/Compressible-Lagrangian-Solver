@@ -141,24 +141,31 @@ class TestMovingPistonBC:
         )
         assert bc.piston_temperature == 400.0
 
-    def test_porous_piston(self, eos):
-        """Test porous piston initialization."""
-        bc = MovingPistonBC(
-            BoundarySide.LEFT,
-            eos,
-            velocity=0.0,
-            porous=True,
-            permeability=1e-10,
-            slip_coefficient=0.5,
-        )
-        assert bc.is_porous
-        assert bc.permeability == 1e-10
-        assert bc.slip_coefficient == 0.5
+    def test_porous_piston_deprecated(self, eos):
+        """Test that porous piston emits deprecation warning but doesn't crash."""
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            bc = MovingPistonBC(
+                BoundarySide.LEFT,
+                eos,
+                velocity=0.0,
+                porous=True,
+                permeability=1e-10,
+                slip_coefficient=0.5,
+            )
+            # Check that a DeprecationWarning was issued
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "porous" in str(w[0].message).lower()
 
-    def test_porous_requires_parameters(self, eos):
-        """Test that porous BC requires permeability and slip coefficient."""
-        with pytest.raises(ValueError):
-            MovingPistonBC(BoundarySide.LEFT, eos, velocity=0.0, porous=True)
+    def test_porous_parameters_ignored(self, eos):
+        """Test that porous parameters are silently ignored (with warning)."""
+        import warnings
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            # Should not raise - porous parameters are ignored
+            bc = MovingPistonBC(BoundarySide.LEFT, eos, velocity=0.0, porous=True)
 
 
 class TestVelocityProfiles:
@@ -214,25 +221,27 @@ class TestOpenBC:
         """Test flow regime detection."""
         from lagrangian_solver.boundary.open import FlowRegime
 
-        # Create subsonic outflow state (u < 0, |u| < c at right boundary)
+        # Create subsonic outflow state at RIGHT boundary
+        # Flow leaving through right boundary means u > 0 (moving right)
         rho = np.ones(10) * 1.225
-        u = np.full(11, -10.0)  # Flow to the left
+        u = np.full(11, 10.0)  # Flow to the right (outflow through right boundary)
         p = np.ones(10) * 101325.0
         state = FlowState.from_primitive(rho, u, p, grid.x.copy(), eos)
 
         bc = OpenBC(BoundarySide.RIGHT, eos)
         regime = bc.determine_regime(state)
 
-        # At right boundary with u < 0, flow is outgoing
+        # At right boundary with u > 0, flow is outgoing (leaving through right)
         assert regime == FlowRegime.SUBSONIC_OUTFLOW
 
     def test_supersonic_extrapolation(self, eos, grid):
         """Test that supersonic outflow extrapolates all quantities."""
         from lagrangian_solver.boundary.open import FlowRegime
 
-        # Create supersonic outflow state
+        # Create supersonic outflow state at RIGHT boundary
+        # Flow leaving through right boundary at supersonic speed
         rho = np.ones(10) * 1.225
-        u = np.full(11, -500.0)  # Supersonic flow to the left
+        u = np.full(11, 500.0)  # Supersonic flow to the right
         p = np.ones(10) * 101325.0
         state = FlowState.from_primitive(rho, u, p, grid.x.copy(), eos)
 

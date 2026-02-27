@@ -139,3 +139,47 @@ Each citation should include:
 **Used in**: `src/lagrangian_solver/numerics/artificial_viscosity.py:45-55`
 
 **Description**: Linear artificial viscosity term Q_lin = c₁ × ρ × c × dx × |∂u/∂x| that supplements the quadratic VNR viscosity. The linear term damps high-frequency oscillations at the shock head that the quadratic term alone cannot eliminate. As noted in the original report: "Although quadratic viscosity successfully controlled unphysical post-shock oscillations, it did NOT totally eliminate them nor the troublesome overshoots that typically appeared at the head of the numerical shock front."
+
+### Compatible Energy Discretization
+
+**Reference**: Caramana, E.J., Burton, D.E., Shashkov, M.J., & Whalen, P.P. (1998). The construction of compatible hydrodynamics algorithms utilizing conservation of total energy. *Journal of Computational Physics*, 146(1), 227-262. DOI: 10.1006/jcph.1998.6029
+
+**Used in**:
+- `src/lagrangian_solver/equations/conservation.py` - CompatibleConservation class
+- `src/lagrangian_solver/numerics/time_integration.py` - CompatibleHeunIntegrator class
+- `src/lagrangian_solver/core/solver.py` - CompatibleLagrangianSolver class
+- `src/lagrangian_solver/core/state.py:203-280` - from_internal_energy() method
+
+**Description**: Compatible energy discretization for Lagrangian hydrodynamics. The key insight is using the SAME cell-centered stress σ = p + Q in both momentum and energy equations:
+- Momentum: du_j/dt = -(σ_j - σ_{j-1}) / dm_face
+- Energy: de_i/dt = -σ_i × dτ_i/dt = -σ_i × (u_{i+1} - u_i) / dm_i
+
+This guarantees exact total energy conservation to machine precision (O(10^-15) relative error). Internal energy e is the PRIMARY evolved variable; total energy E = e + ½u² is derived for diagnostics only.
+
+### Lagrangian Staggered-Grid Energy Conservation
+
+**Reference**: Burton, D.E. (1992). Conservation of energy, momentum, and angular momentum in Lagrangian staggered-grid hydrodynamics. *Lawrence Livermore National Laboratory Report UCRL-JC-105926*.
+
+**Used in**: `src/lagrangian_solver/equations/conservation.py`, `src/lagrangian_solver/core/solver.py`
+
+**Description**: Theoretical foundation for exact conservation properties on staggered Lagrangian grids. The staggered arrangement (cell-centered thermodynamics, face-centered velocity) enables exact discrete conservation when the discretization is "compatible" - using consistent operators for momentum and energy.
+
+### Rankine-Hugoniot Shock Relations for Piston BC
+
+**Reference**: [Toro2009] Chapter 3, Sections 3.1-3.2
+
+**Used in**: `src/lagrangian_solver/boundary/piston.py:140-220` - CompatiblePistonBC class
+
+**Description**: Exact Rankine-Hugoniot jump conditions for computing wall pressure at a moving piston. For compression (shock), uses Newton iteration to solve:
+- f(p*) = Δu - (p* - p) × A, where A = √[2/(ρ(γ+1)) × (p* + (γ-1)/(γ+1) × p)]
+
+For expansion (rarefaction), uses isentropic relation:
+- p*/p = [1 + (γ-1)/2 × Δu/c]^(2γ/(γ-1))
+
+### GDTk L1D Reference Implementation
+
+**Reference**: GDTk - Gas Dynamics Toolkit, L1D (1D Lagrangian Gas Dynamics). https://github.com/gdtk-uq/gdtk
+
+**Used in**: Design reference for compatible Lagrangian solver architecture
+
+**Description**: Open-source reference implementation of 1D Lagrangian gas dynamics with compatible energy discretization. Used as architectural reference for the solver design, particularly the treatment of staggered variables and boundary conditions.

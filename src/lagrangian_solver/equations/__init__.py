@@ -2,8 +2,8 @@
 
 from lagrangian_solver.equations.eos import EOSBase, IdealGasEOS, CanteraEOS
 
-# LagrangianConservation imported lazily to avoid circular imports
-# Use: from lagrangian_solver.equations.conservation import LagrangianConservation
+# CompatibleConservation is the main conservation class for compatible energy discretization
+# Use: from lagrangian_solver.equations.conservation import CompatibleConservation
 
 __all__ = [
     "EOSBase",

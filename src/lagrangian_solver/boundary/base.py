@@ -1,13 +1,21 @@
 """
-Base classes for boundary conditions.
+Base classes for boundary conditions (compatible energy discretization).
 
 This module defines the abstract interface and enumerations for
-boundary conditions in the Lagrangian solver.
+boundary conditions in the compatible Lagrangian solver.
+
+For compatible energy discretization, boundary conditions must implement:
+    - apply_velocity(): Set boundary face velocity
+    - apply_momentum(): Set momentum rate d_u at boundary faces
+
+The momentum rate uses cell-centered stress σ = p + Q, which is
+consistent with the interior discretization.
 
 References:
     [Poinsot1992] Poinsot & Lele, "Boundary conditions for direct simulations
                   of compressible viscous flows" JCP 1992
     [Toro2009] Chapter 6 - Boundary conditions
+    [Caramana1998] Section 4 - Boundary conditions for compatible hydrodynamics
 """
 
 from abc import ABC, abstractmethod
@@ -47,7 +55,7 @@ class BoundaryType(Enum):
 @dataclass
 class BoundaryFlux:
     """
-    Boundary fluxes for a single boundary.
+    Boundary fluxes for a single boundary (legacy interface).
 
     Attributes:
         p_flux: Pressure flux (for momentum equation) [Pa]
@@ -64,11 +72,14 @@ class BoundaryCondition(ABC):
     """
     Abstract base class for all boundary conditions.
 
-    Each boundary condition must implement:
-    1. apply(): Set ghost cell / boundary face values
-    2. compute_flux(): Return the numerical flux at the boundary
+    For compatible energy discretization, each boundary condition must implement:
+    1. apply_velocity(): Set the velocity at the boundary face
+    2. apply_momentum(): Set the momentum rate d_u at boundary faces
 
-    Reference: [Poinsot1992] for NSCBC-based boundary conditions
+    The legacy interface (apply, compute_flux) is retained for backward
+    compatibility but should not be used with CompatibleConservation.
+
+    Reference: [Caramana1998] Section 4
     """
 
     def __init__(self, side: BoundarySide, eos: EOSBase):
@@ -112,43 +123,50 @@ class BoundaryCondition(ABC):
         """
         return 0 if self._side == BoundarySide.LEFT else -1
 
+    # ==================== Compatible Interface ====================
+    # These methods are used by CompatibleConservation
+
     @abstractmethod
-    def apply(
+    def apply_velocity(
         self,
         state: FlowState,
         grid: LagrangianGrid,
         t: float,
     ) -> None:
         """
-        Apply boundary condition to the state.
+        Set the velocity at the boundary face.
 
-        This method modifies the state in-place to enforce the
-        boundary condition at the current time.
+        This is called before computing the RHS to ensure boundary
+        velocities are correctly set for computing d_tau.
 
         Args:
-            state: Flow state to modify
+            state: Flow state to modify (u at boundary face)
             grid: Lagrangian grid
             t: Current time [s]
         """
         pass
 
     @abstractmethod
-    def compute_flux(
+    def apply_momentum(
         self,
         state: FlowState,
         grid: LagrangianGrid,
+        d_u: np.ndarray,
+        sigma: np.ndarray,
         t: float,
-    ) -> BoundaryFlux:
+    ) -> None:
         """
-        Compute the numerical flux at the boundary.
+        Set the momentum rate d_u at the boundary face.
+
+        For compatible discretization, this uses the same cell-centered
+        stress σ = p + Q as the interior, ensuring energy conservation.
 
         Args:
             state: Current flow state
             grid: Lagrangian grid
+            d_u: Momentum rate array (modified in-place at boundary)
+            sigma: Cell-centered total stress σ = p + Q [Pa]
             t: Current time [s]
-
-        Returns:
-            BoundaryFlux with pressure, energy, and velocity fluxes
         """
         pass
 
@@ -167,6 +185,45 @@ class BoundaryCondition(ABC):
             Boundary velocity [m/s]
         """
         pass
+
+    # ==================== Legacy Interface ====================
+    # These methods are kept for backward compatibility
+
+    def apply(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """
+        LEGACY: Apply boundary condition to the state.
+
+        For compatible discretization, use apply_velocity() instead.
+        """
+        # Default: delegate to apply_velocity
+        self.apply_velocity(state, grid, t)
+
+    def compute_flux(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> BoundaryFlux:
+        """
+        LEGACY: Compute the numerical flux at the boundary.
+
+        For compatible discretization, use apply_momentum() instead.
+        This method is retained for backward compatibility with the
+        old Riemann-based solver.
+        """
+        # Default implementation using cell pressure
+        p_wall = state.p[self.cell_index]
+        u_boundary = state.u[self.face_index]
+        return BoundaryFlux(
+            p_flux=p_wall,
+            pu_flux=p_wall * u_boundary,
+            u_flux=u_boundary,
+        )
 
     def update_position(
         self, grid: LagrangianGrid, dt: float, t: float
@@ -189,23 +246,45 @@ class BoundaryCondition(ABC):
 
 class ReflectiveBC(BoundaryCondition):
     """
-    Simple reflective boundary condition.
+    Simple reflective (solid wall) boundary condition.
 
     Reflects velocity while maintaining pressure and density.
-    Useful for testing and simple configurations.
+    The wall is stationary with u = 0.
+
+    For compatible discretization:
+        - Velocity: u[boundary] = 0
+        - Momentum: d_u[boundary] computed from wall pressure
     """
 
     def __init__(self, side: BoundarySide, eos: EOSBase):
         super().__init__(side, eos)
 
-    def apply(
+    def apply_velocity(
         self,
         state: FlowState,
         grid: LagrangianGrid,
         t: float,
     ) -> None:
-        """Apply reflective BC: u = 0 at wall."""
+        """Set u = 0 at wall."""
         state.u[self.face_index] = 0.0
+
+    def apply_momentum(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        d_u: np.ndarray,
+        sigma: np.ndarray,
+        t: float,
+    ) -> None:
+        """
+        Set momentum rate at stationary wall.
+
+        At a stationary wall, d_u = 0 (velocity stays at zero).
+        """
+        d_u[self.face_index] = 0.0
+
+    def get_boundary_velocity(self, t: float) -> float:
+        return 0.0
 
     def compute_flux(
         self,
@@ -223,6 +302,3 @@ class ReflectiveBC(BoundaryCondition):
         """
         p_wall = state.p[self.cell_index]
         return BoundaryFlux(p_flux=p_wall, pu_flux=0.0, u_flux=0.0)
-
-    def get_boundary_velocity(self, t: float) -> float:
-        return 0.0

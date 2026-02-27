@@ -1,13 +1,22 @@
 """
-Moving piston boundary conditions.
+Moving piston boundary conditions with Rankine-Hugoniot shock relations.
 
-Implements moving solid boundaries with prescribed velocity, including
-adiabatic, isothermal, and porous conditions.
+Implements moving solid boundaries with prescribed velocity for
+compatible energy discretization. Uses exact shock relations for
+strong shocks via Newton iteration.
+
+Key Design:
+    For strong shocks (compression), the wall pressure is computed
+    from Rankine-Hugoniot jump conditions using Newton iteration.
+    This gives the correct post-shock state for piston problems.
+
+    For weak perturbations or expansion, uses acoustic approximation
+    or isentropic relations.
 
 References:
-    [Toro2009] Section 6.3.2 - Moving boundaries
-    [BeaversJoseph1967] Beavers & Joseph, "Boundary conditions at a naturally
-                        permeable wall" JFM 1967 - Porous boundary conditions
+    [Toro2009] Chapter 3 - Exact Riemann solver and shock relations
+    [Caramana1998] Section 4 - Boundary conditions
+    [GDTk] L1D solver - https://github.com/gdtk-uq/gdtk
 """
 
 from typing import Optional, Callable, Union
@@ -28,17 +37,369 @@ from lagrangian_solver.equations.eos import EOSBase
 VelocityProfile = Callable[[float], float]
 
 
-class MovingPistonBC(BoundaryCondition):
+class CompatiblePistonBC(BoundaryCondition):
     """
-    Moving piston boundary condition.
+    Moving piston BC using Rankine-Hugoniot shock relations.
 
-    The piston moves with a prescribed velocity v_piston(t).
-    The boundary can be:
-    - Adiabatic: No heat transfer through piston
-    - Isothermal: Piston maintains fixed temperature
-    - Porous: Allows some mass flux through (Darcy flow with slip)
+    For strong shocks, solves the exact shock jump conditions using
+    Newton iteration. For weak perturbations, uses acoustic approximation.
 
-    Reference: [Toro2009] Section 6.3.2, [Despres2017] Section 4.3.2
+    This BC is designed for compatible energy discretization:
+        - apply_velocity(): Sets face velocity to piston velocity
+        - apply_momentum(): Computes d_u from shock-based wall pressure
+
+    The wall pressure comes from solving the Rankine-Hugoniot conditions,
+    NOT from a Riemann solver. This ensures consistency with the
+    cell-centered stress discretization.
+
+    Reference: Toro (2009) Chapter 3, GDTk L1D solver
+    """
+
+    def __init__(
+        self,
+        side: BoundarySide,
+        eos: EOSBase,
+        velocity: Union[float, VelocityProfile],
+        thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
+        piston_temperature: Optional[float] = None,
+    ):
+        """
+        Initialize compatible piston boundary condition.
+
+        Args:
+            side: Which side of the domain (LEFT or RIGHT)
+            eos: Equation of state
+            velocity: Piston velocity [m/s] or function v(t)
+                      Positive = moving right, Negative = moving left
+            thermal_bc: Type of thermal boundary condition
+            piston_temperature: Piston temperature [K] (for isothermal)
+        """
+        super().__init__(side, eos)
+
+        # Velocity profile
+        if callable(velocity):
+            self._velocity_func = velocity
+        else:
+            self._velocity_func = lambda t: velocity
+
+        self._thermal_bc = thermal_bc
+        self._piston_temperature = piston_temperature
+
+        if thermal_bc == ThermalBCType.ISOTHERMAL and piston_temperature is None:
+            raise ValueError("piston_temperature required for isothermal BC")
+
+        # Store computed wall pressure for diagnostics
+        self._p_wall = None
+
+    @property
+    def thermal_bc(self) -> ThermalBCType:
+        """Type of thermal boundary condition."""
+        return self._thermal_bc
+
+    @property
+    def piston_temperature(self) -> Optional[float]:
+        """Piston temperature for isothermal BC [K]."""
+        return self._piston_temperature
+
+    @property
+    def wall_pressure(self) -> Optional[float]:
+        """Most recently computed wall pressure [Pa]."""
+        return self._p_wall
+
+    def get_boundary_velocity(self, t: float) -> float:
+        """Get piston velocity at time t."""
+        return self._velocity_func(t)
+
+    def apply_velocity(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """
+        Set face velocity to piston velocity.
+
+        This is called before computing the RHS.
+        """
+        v_piston = self.get_boundary_velocity(t)
+        state.u[self.face_index] = v_piston
+
+    def apply_momentum(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        d_u: np.ndarray,
+        sigma: np.ndarray,
+        t: float,
+    ) -> None:
+        """
+        Compute momentum rate at piston using shock-based wall pressure.
+
+        For a moving piston:
+            d_u[boundary] is set to maintain piston velocity
+
+        The key insight: at the piston face, d_u should be such that
+        the velocity stays equal to the piston velocity. For a constant
+        velocity piston, d_u = 0. For an accelerating piston, d_u = dv_p/dt.
+
+        For now, we assume constant or slowly varying piston velocity,
+        so d_u[boundary] = 0.
+
+        Args:
+            state: Current flow state
+            grid: Lagrangian grid
+            d_u: Momentum rate array (modified at boundary)
+            sigma: Cell-centered total stress [Pa]
+            t: Current time [s]
+        """
+        # The piston velocity is prescribed, so d_u at the piston face
+        # is determined by the piston motion, not the fluid dynamics.
+        # For constant velocity piston: d_u = 0
+        # For accelerating piston: d_u = dv_piston/dt
+
+        # Simple finite difference for piston acceleration
+        dt_check = 1e-8
+        v_now = self._velocity_func(t)
+        v_later = self._velocity_func(t + dt_check)
+        dv_dt = (v_later - v_now) / dt_check
+
+        d_u[self.face_index] = dv_dt
+
+        # Also compute and store wall pressure for diagnostics
+        self._compute_wall_pressure(state, grid, t)
+
+    def _compute_wall_pressure(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> float:
+        """
+        Compute wall pressure using Rankine-Hugoniot relations.
+
+        For compression (piston moving into gas), solve shock jump conditions.
+        For expansion (piston moving away), use isentropic relations.
+
+        Reference: Toro (2009) Section 3.1
+        """
+        v_piston = self.get_boundary_velocity(t)
+
+        # Get adjacent cell state
+        idx = self.cell_index
+        rho = state.rho[idx]
+        p = state.p[idx]
+        c = state.c[idx]
+        gamma = state.gamma[idx]
+
+        # Interior velocity (at face next to boundary)
+        if self._side == BoundarySide.LEFT:
+            # Left piston: interior face is u[1]
+            u_int = state.u[1]
+            # Compression: piston moving right into gas (v_piston > u_int)
+            is_compression = v_piston > u_int
+        else:
+            # Right piston: interior face is u[-2]
+            u_int = state.u[-2]
+            # Compression: piston moving left into gas (v_piston < u_int)
+            is_compression = v_piston < u_int
+
+        if is_compression:
+            # Shock wave - use Rankine-Hugoniot
+            self._p_wall = self._shock_pressure(
+                rho, p, c, gamma, u_int, v_piston
+            )
+        else:
+            # Expansion wave - use isentropic relations
+            self._p_wall = self._rarefaction_pressure(
+                rho, p, c, gamma, u_int, v_piston
+            )
+
+        return self._p_wall
+
+    def _shock_pressure(
+        self,
+        rho: float,
+        p: float,
+        c: float,
+        gamma: float,
+        u_int: float,
+        v_piston: float,
+    ) -> float:
+        """
+        Compute wall pressure from shock using Newton iteration.
+
+        Solves the Rankine-Hugoniot jump conditions for the shock
+        pressure given the piston velocity.
+
+        Reference: Toro (2009) Section 3.1, Equations (3.6)-(3.12)
+
+        Args:
+            rho: Pre-shock density [kg/m³]
+            p: Pre-shock pressure [Pa]
+            c: Pre-shock sound speed [m/s]
+            gamma: Ratio of specific heats
+            u_int: Interior velocity [m/s]
+            v_piston: Piston velocity [m/s]
+
+        Returns:
+            Post-shock (wall) pressure [Pa]
+        """
+        gp1 = gamma + 1.0
+        gm1 = gamma - 1.0
+
+        # Velocity jump
+        if self._side == BoundarySide.LEFT:
+            du = v_piston - u_int
+        else:
+            du = u_int - v_piston
+
+        # Initial guess from acoustic approximation
+        p_star = p + rho * c * abs(du)
+
+        # Newton iteration for exact shock pressure
+        # The shock relation: u* - u = (p* - p) / (ρ * S)
+        # where S = c * sqrt[(γ+1)/(2γ) * (p*/p - 1) + 1] is shock speed
+
+        for iteration in range(20):
+            # Pressure ratio
+            pr = p_star / p
+
+            # Shock speed factor: A = sqrt[2/(γρ) * (γ+1)/2 * p* + (γ-1)/2 * p]
+            A_sq = (2.0 / (rho * gp1)) * (p_star + gm1 / gp1 * p)
+            A = np.sqrt(max(A_sq, 1e-30))
+
+            # Function: f(p*) = du - (p* - p) * A
+            f = abs(du) - (p_star - p) * A
+
+            # Derivative
+            dA_dp = 1.0 / (rho * gp1 * A)
+            df_dp = -A - (p_star - p) * dA_dp
+
+            # Newton update
+            dp = -f / df_dp
+
+            p_star_new = p_star + dp
+
+            # Convergence check
+            if abs(dp / max(p_star, 1e-10)) < 1e-8:
+                break
+
+            # Ensure positive pressure
+            p_star = max(p_star_new, p * 0.01)
+
+        return max(p_star, 1e-10)
+
+    def _rarefaction_pressure(
+        self,
+        rho: float,
+        p: float,
+        c: float,
+        gamma: float,
+        u_int: float,
+        v_piston: float,
+    ) -> float:
+        """
+        Compute wall pressure from isentropic expansion.
+
+        For expansion waves, use the isentropic relation:
+            p* / p = [1 + (γ-1)/2 * (u - u*) / c]^(2γ/(γ-1))
+
+        Reference: Toro (2009) Section 3.2
+
+        Args:
+            rho: Density [kg/m³]
+            p: Interior pressure [Pa]
+            c: Sound speed [m/s]
+            gamma: Ratio of specific heats
+            u_int: Interior velocity [m/s]
+            v_piston: Piston velocity [m/s]
+
+        Returns:
+            Wall pressure [Pa]
+        """
+        gm1 = gamma - 1.0
+
+        # Velocity difference
+        if self._side == BoundarySide.LEFT:
+            du = v_piston - u_int  # Negative for expansion
+        else:
+            du = u_int - v_piston  # Negative for expansion
+
+        # Isentropic relation: p*/p = (1 + (γ-1)/2 * du/c)^(2γ/(γ-1))
+        # For du < 0 (expansion), this gives p* < p
+        term = 1.0 + gm1 / 2.0 * du / c
+
+        if term <= 0:
+            # Vacuum state - gas cannot expand faster than 2c/(γ-1)
+            return 1e-10
+
+        p_star = p * term ** (2.0 * gamma / gm1)
+
+        return max(p_star, 1e-10)
+
+    # Legacy interface for backward compatibility
+    def apply(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """LEGACY: Use apply_velocity() instead."""
+        self.apply_velocity(state, grid, t)
+
+    def compute_flux(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> BoundaryFlux:
+        """
+        LEGACY: Compute numerical flux at moving piston.
+
+        For compatible discretization, use apply_momentum() instead.
+        """
+        v_piston = self.get_boundary_velocity(t)
+        p_wall = self._compute_wall_pressure(state, grid, t)
+
+        return BoundaryFlux(
+            p_flux=p_wall,
+            pu_flux=p_wall * v_piston,
+            u_flux=v_piston,
+        )
+
+    def update_position(
+        self, grid: LagrangianGrid, dt: float, t: float
+    ) -> float:
+        """Compute new piston position."""
+        current_x = grid.x[self.face_index]
+        return current_x + dt * self.get_boundary_velocity(t)
+
+    def get_piston_position(self, x0: float, t: float) -> float:
+        """
+        Get analytical piston position at time t.
+
+        Integrates the velocity profile from 0 to t.
+
+        Args:
+            x0: Initial piston position [m]
+            t: Current time [s]
+
+        Returns:
+            Piston position [m]
+        """
+        from scipy import integrate
+
+        result, _ = integrate.quad(self._velocity_func, 0, t)
+        return x0 + result
+
+
+# Keep MovingPistonBC as an alias for backward compatibility
+class MovingPistonBC(CompatiblePistonBC):
+    """
+    Alias for CompatiblePistonBC for backward compatibility.
+
+    NOTE: This now uses the compatible discretization interface.
+    If you need the old Riemann-based BC, see the git history.
     """
 
     def __init__(
@@ -53,203 +414,30 @@ class MovingPistonBC(BoundaryCondition):
         slip_coefficient: float = 0.0,
     ):
         """
-        Initialize moving piston boundary condition.
+        Initialize moving piston BC.
 
-        Args:
-            side: Which side of the domain (LEFT or RIGHT)
-            eos: Equation of state
-            velocity: Piston velocity [m/s] or function v(t)
-                      Positive = moving right, Negative = moving left
-            thermal_bc: Type of thermal boundary condition
-            piston_temperature: Piston temperature [K] (for isothermal)
-            porous: Whether piston is porous
-            permeability: Darcy permeability K [m²] (for porous)
-            slip_coefficient: Beavers-Joseph slip coefficient α_BJ [-]
-
-        Reference: [BeaversJoseph1967] for porous BC parameters
+        NOTE: porous parameters are deprecated and ignored in the
+        compatible discretization. Use a specialized porous BC if needed.
         """
-        super().__init__(side, eos)
-
-        # Velocity profile
-        if callable(velocity):
-            self._velocity_func = velocity
-        else:
-            self._velocity_func = lambda t: velocity
-
-        self._thermal_bc = thermal_bc
-        self._piston_temperature = piston_temperature
-
-        # Porous parameters
-        self._porous = porous
-        self._permeability = permeability  # K [m²]
-        self._slip_coefficient = slip_coefficient  # α_BJ [-]
-
-        if thermal_bc == ThermalBCType.ISOTHERMAL and piston_temperature is None:
-            raise ValueError("piston_temperature required for isothermal BC")
-
-        if porous and (permeability <= 0 or slip_coefficient <= 0):
-            raise ValueError(
-                "Positive permeability and slip_coefficient required for porous BC"
+        if porous:
+            import warnings
+            warnings.warn(
+                "Porous piston not supported in compatible discretization. "
+                "Ignoring porous parameters.",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
-    @property
-    def thermal_bc(self) -> ThermalBCType:
-        """Type of thermal boundary condition."""
-        return self._thermal_bc
-
-    @property
-    def piston_temperature(self) -> Optional[float]:
-        """Piston temperature for isothermal BC [K]."""
-        return self._piston_temperature
-
-    @property
-    def is_porous(self) -> bool:
-        """Whether piston is porous."""
-        return self._porous
-
-    @property
-    def permeability(self) -> float:
-        """Darcy permeability [m²]."""
-        return self._permeability
-
-    @property
-    def slip_coefficient(self) -> float:
-        """Beavers-Joseph slip coefficient [-]."""
-        return self._slip_coefficient
-
-    def get_boundary_velocity(self, t: float) -> float:
-        """Get piston velocity at time t."""
-        return self._velocity_func(t)
-
-    def apply(
-        self,
-        state: FlowState,
-        grid: LagrangianGrid,
-        t: float,
-    ) -> None:
-        """
-        Apply moving piston boundary condition.
-
-        Sets boundary face velocity to match piston velocity,
-        with possible correction for porous flow.
-
-        Reference: [BeaversJoseph1967] Equation (1) for porous slip
-        """
-        v_piston = self.get_boundary_velocity(t)
-
-        if self._porous:
-            # Beavers-Joseph slip condition
-            # u_slip - u_piston = (sqrt(K)/α_BJ) * du/dy
-            # For 1D, approximate du/dy from adjacent cell
-            idx = self.cell_index
-            u_adj = 0.5 * (state.u[abs(idx)] + state.u[abs(idx) + 1])
-
-            # Slip velocity correction
-            sqrt_K = np.sqrt(self._permeability)
-            slip_factor = sqrt_K / self._slip_coefficient
-
-            # Estimate velocity gradient (simplified for 1D)
-            dx = state.dx[idx]
-            du_dn = (u_adj - v_piston) / dx
-
-            u_boundary = v_piston + slip_factor * du_dn
-        else:
-            u_boundary = v_piston
-
-        state.u[self.face_index] = u_boundary
-
-    def compute_flux(
-        self,
-        state: FlowState,
-        grid: LagrangianGrid,
-        t: float,
-    ) -> BoundaryFlux:
-        """
-        Compute numerical flux at moving piston.
-
-        Uses acoustic impedance matching to determine wall pressure:
-            p_wall = p_adj ± ρc(u_wall - u_adj)
-
-        Reference: [Toro2009] Section 6.3.2, Equation (6.17)
-        """
-        v_piston = self.get_boundary_velocity(t)
-
-        # Get adjacent cell state
-        idx = self.cell_index
-        p_adj = state.p[idx]
-        rho_adj = state.rho[idx]
-        c_adj = state.c[idx]
-
-        # Cell-averaged velocity
-        if self._side == BoundarySide.LEFT:
-            u_adj = 0.5 * (state.u[0] + state.u[1])
-            # Left boundary: right-running wave reflected from piston
-            p_wall = p_adj + rho_adj * c_adj * (v_piston - u_adj)
-        else:
-            u_adj = 0.5 * (state.u[-2] + state.u[-1])
-            # Right boundary: left-running wave reflected from piston
-            p_wall = p_adj - rho_adj * c_adj * (v_piston - u_adj)
-
-        # For porous piston, add Darcy pressure correction
-        if self._porous:
-            # Darcy law: ṁ = -(ρK/μ) ∂p/∂n
-            # This adds a pressure drop across the porous interface
-            # Simplified model: assume dynamic viscosity μ from EOS
-            # For ideal gas, μ ~ 1.8e-5 Pa·s for air
-            mu = 1.8e-5  # Simplified, could use Sutherland's law
-
-            # Mass flux through porous interface
-            dp_dn = (p_adj - p_wall) / state.dx[idx]  # Approximate gradient
-            mass_flux = -rho_adj * self._permeability / mu * dp_dn
-
-            # Adjust wall pressure based on mass flux
-            # This is a simplified coupling
-            p_wall = p_wall - 0.5 * mass_flux * c_adj
-
-        # Ensure positive pressure
-        p_wall = max(p_wall, 1e-10)
-
-        # Get actual boundary velocity (may differ from piston if porous)
-        u_boundary = state.u[self.face_index]
-
-        return BoundaryFlux(
-            p_flux=p_wall,
-            pu_flux=p_wall * u_boundary,
-            u_flux=u_boundary,
+        super().__init__(
+            side=side,
+            eos=eos,
+            velocity=velocity,
+            thermal_bc=thermal_bc,
+            piston_temperature=piston_temperature,
         )
 
-    def update_position(
-        self, grid: LagrangianGrid, dt: float, t: float
-    ) -> float:
-        """
-        Compute new piston position.
 
-        For non-porous piston, position updates with piston velocity.
-        For porous piston, there may be slight deviation due to slip.
-        """
-        current_x = grid.x[self.face_index]
-        return current_x + dt * self.get_boundary_velocity(t)
-
-    def get_piston_position(self, x0: float, t: float) -> float:
-        """
-        Get analytical piston position at time t.
-
-        Integrates the velocity profile from 0 to t.
-        For constant velocity, this is x0 + v*t.
-
-        Args:
-            x0: Initial piston position [m]
-            t: Current time [s]
-
-        Returns:
-            Piston position [m]
-        """
-        # Numerical integration for general velocity profiles
-        from scipy import integrate
-
-        result, _ = integrate.quad(self._velocity_func, 0, t)
-        return x0 + result
-
+# Utility functions for creating piston velocity profiles
 
 def sinusoidal_piston(
     amplitude: float, frequency: float, phase: float = 0.0

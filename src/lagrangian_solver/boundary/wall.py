@@ -1,12 +1,17 @@
 """
-Solid wall boundary conditions.
+Solid wall boundary conditions for compatible energy discretization.
 
 Implements stationary solid wall boundaries with adiabatic or isothermal
 thermal conditions.
 
+For compatible discretization:
+    - apply_velocity(): Sets u = 0 at wall
+    - apply_momentum(): Sets d_u = 0 at wall (velocity stays at zero)
+
 References:
     [Toro2009] Section 6.3 - Reflective boundary conditions
     [Poinsot1992] Section 4 - Wall boundary conditions
+    [Caramana1998] Section 4 - Boundary conditions for compatible hydrodynamics
 """
 
 from typing import Optional
@@ -31,12 +36,11 @@ class SolidWallBC(BoundaryCondition):
     - Velocity: u = 0 (no penetration)
     - Thermal: Either adiabatic (∂T/∂n = 0) or isothermal (T = T_wall)
 
-    For inviscid Euler equations, the adiabatic and isothermal conditions
-    are equivalent since there is no thermal diffusion. The distinction
-    becomes important for viscous simulations or when coupling with heat
-    transfer.
+    For compatible discretization:
+    - apply_velocity(): Sets u[boundary] = 0
+    - apply_momentum(): Sets d_u[boundary] = 0
 
-    Reference: [Toro2009] Section 6.3, [Poinsot1992] Section 4.2
+    Reference: [Toro2009] Section 6.3, [Caramana1998] Section 4
     """
 
     def __init__(
@@ -72,28 +76,48 @@ class SolidWallBC(BoundaryCondition):
         """Wall temperature for isothermal BC [K]."""
         return self._wall_temperature
 
-    def apply(
+    def get_boundary_velocity(self, t: float) -> float:
+        """Solid wall velocity is always zero."""
+        return 0.0
+
+    def apply_velocity(
         self,
         state: FlowState,
         grid: LagrangianGrid,
         t: float,
     ) -> None:
         """
-        Apply solid wall boundary condition.
+        Set u = 0 at the wall.
 
-        Sets:
-        - u = 0 at the wall face
-        - For isothermal: adjusts temperature (affects EOS calculations)
-
-        Reference: [Poinsot1992] Equations (4.5)-(4.7)
+        Reference: [Caramana1998] Section 4
         """
-        # Enforce no-penetration condition
         state.u[self.face_index] = 0.0
 
-        # For isothermal BC, we would need to modify the temperature
-        # at the adjacent cell to enforce the wall temperature.
-        # This is more relevant for viscous flows with heat diffusion.
-        # For inviscid flows, we just note the wall temperature for output.
+    def apply_momentum(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        d_u: np.ndarray,
+        sigma: np.ndarray,
+        t: float,
+    ) -> None:
+        """
+        Set d_u = 0 at stationary wall.
+
+        At a stationary wall, the velocity must remain zero,
+        so the momentum rate is zero.
+        """
+        d_u[self.face_index] = 0.0
+
+    # Legacy interface
+    def apply(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """LEGACY: Use apply_velocity()."""
+        self.apply_velocity(state, grid, t)
 
     def compute_flux(
         self,
@@ -102,59 +126,24 @@ class SolidWallBC(BoundaryCondition):
         t: float,
     ) -> BoundaryFlux:
         """
-        Compute numerical flux at solid wall.
+        LEGACY: Compute numerical flux at solid wall.
 
         At a stationary solid wall:
-        - The wall pressure is computed from the adjacent cell
-          using acoustic impedance matching
-        - Velocity is zero, so energy flux is zero
-
-        For Lagrangian formulation with wall at rest:
-            p_wall = p_adjacent (for inviscid flow)
-
-        Reference: [Despres2017] Section 4.3
+        - Pressure flux from adjacent cell
+        - Velocity = 0, so energy flux = 0
         """
-        # Get adjacent cell state
-        idx = self.cell_index
-        p_adj = state.p[idx]
-        rho_adj = state.rho[idx]
-        c_adj = state.c[idx]
-
-        # For a stationary wall, use acoustic relation to find wall pressure
-        # In characteristic form: p - p_adj = ±ρc(u - u_adj)
-        # With u_wall = 0:
-        if self._side == BoundarySide.LEFT:
-            # Wave going into domain from left wall
-            # Use p = p_adj + ρc * u_adj (right-running wave reflected)
-            u_adj = 0.5 * (state.u[0] + state.u[1])
-            p_wall = p_adj + rho_adj * c_adj * u_adj
-        else:
-            # Wave going into domain from right wall
-            # Use p = p_adj - ρc * u_adj (left-running wave reflected)
-            u_adj = 0.5 * (state.u[-2] + state.u[-1])
-            p_wall = p_adj - rho_adj * c_adj * u_adj
-
-        # Ensure positive pressure
-        p_wall = max(p_wall, 1e-10)
-
-        # At stationary wall: u = 0, so energy flux = p * u = 0
+        p_wall = state.p[self.cell_index]
         return BoundaryFlux(
             p_flux=p_wall,
             pu_flux=0.0,
             u_flux=0.0,
         )
 
-    def get_boundary_velocity(self, t: float) -> float:
-        """Solid wall velocity is always zero."""
-        return 0.0
-
     def get_wall_pressure(
         self, state: FlowState, grid: LagrangianGrid
     ) -> float:
         """
-        Get the pressure at the wall.
-
-        Useful for diagnostics and force calculations.
+        Get the pressure at the wall (for diagnostics).
 
         Args:
             state: Current flow state
@@ -163,8 +152,7 @@ class SolidWallBC(BoundaryCondition):
         Returns:
             Wall pressure [Pa]
         """
-        flux = self.compute_flux(state, grid, 0.0)
-        return flux.p_flux
+        return state.p[self.cell_index]
 
     def get_wall_heat_flux(
         self, state: FlowState, grid: LagrangianGrid
@@ -173,7 +161,6 @@ class SolidWallBC(BoundaryCondition):
         Get heat flux at the wall.
 
         For inviscid Euler equations, this is always zero.
-        Included for interface consistency with viscous solvers.
 
         Args:
             state: Current flow state
@@ -182,12 +169,7 @@ class SolidWallBC(BoundaryCondition):
         Returns:
             Heat flux [W/m²] (always 0 for inviscid)
         """
-        if self._thermal_bc == ThermalBCType.ADIABATIC:
-            return 0.0
-        else:
-            # For viscous flows, would compute from temperature gradient
-            # q = -k * dT/dn
-            return 0.0
+        return 0.0
 
 
 class SymmetryBC(SolidWallBC):

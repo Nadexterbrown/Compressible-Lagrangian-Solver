@@ -1,13 +1,18 @@
 """
-Open boundary conditions.
+Open boundary conditions for compatible energy discretization.
 
 Implements non-reflecting (characteristic-based) open boundary conditions
 for subsonic and supersonic flows.
+
+For compatible discretization:
+    - apply_velocity(): Sets boundary velocity based on flow regime
+    - apply_momentum(): Computes d_u from pressure difference
 
 References:
     [Poinsot1992] Poinsot & Lele, "Boundary conditions for direct simulations
                   of compressible viscous flows" JCP 1992
     [Toro2009] Chapter 6 - Non-reflecting boundary conditions
+    [Caramana1998] Section 4 - Boundary conditions
 """
 
 from enum import Enum, auto
@@ -41,18 +46,9 @@ class OpenBC(BoundaryCondition):
     specified (incoming characteristics) and which should be extrapolated
     (outgoing characteristics).
 
-    Characteristic speeds in 1D:
-        λ₁ = u - c  (left-running acoustic)
-        λ₂ = u      (entropy/contact wave)
-        λ₃ = u + c  (right-running acoustic)
-
-    LEFT boundary (normal pointing left, -x direction):
-        - Positive λ = incoming (extrapolate from interior)
-        - Negative λ = outgoing (specify boundary data)
-
-    RIGHT boundary (normal pointing right, +x direction):
-        - Negative λ = incoming (extrapolate from interior)
-        - Positive λ = outgoing (specify boundary data)
+    For compatible discretization:
+    - apply_velocity(): Sets boundary velocity based on regime
+    - apply_momentum(): Computes d_u from pressure difference
 
     Reference: [Poinsot1992] Section 3, [Toro2009] Section 6.4
     """
@@ -69,19 +65,13 @@ class OpenBC(BoundaryCondition):
         """
         Initialize open boundary condition.
 
-        The required external values depend on the flow regime at runtime:
-        - Subsonic outflow: p_external
-        - Subsonic inflow: u_external and (T_external or rho_external)
-        - Supersonic inflow: u_external, p_external, and (T_external or rho_external)
-        - Supersonic outflow: none (all extrapolated)
-
         Args:
             side: Which side of the domain (LEFT or RIGHT)
             eos: Equation of state
-            p_external: External pressure [Pa] (for inflow/outflow)
-            T_external: External temperature [K] (for inflow)
-            rho_external: External density [kg/m³] (for inflow)
-            u_external: External velocity [m/s] (for inflow)
+            p_external: External pressure [Pa]
+            T_external: External temperature [K]
+            rho_external: External density [kg/m³]
+            u_external: External velocity [m/s]
         """
         super().__init__(side, eos)
         self._p_external = p_external
@@ -109,16 +99,13 @@ class OpenBC(BoundaryCondition):
         """External velocity [m/s]."""
         return self._u_external
 
+    def get_boundary_velocity(self, t: float) -> float:
+        """Get boundary velocity (external velocity if specified)."""
+        return self._u_external if self._u_external is not None else 0.0
+
     def determine_regime(self, state: FlowState) -> FlowRegime:
         """
         Determine the flow regime at the boundary.
-
-        Convention:
-        - Outflow: material leaving the domain through this boundary
-        - Inflow: material entering the domain through this boundary
-
-        At LEFT boundary (x=0): u < 0 means flow to the left, leaving domain = OUTFLOW
-        At RIGHT boundary (x=L): u > 0 means flow to the right, leaving domain = OUTFLOW
 
         Args:
             state: Current flow state
@@ -126,85 +113,169 @@ class OpenBC(BoundaryCondition):
         Returns:
             FlowRegime indicating inflow/outflow and subsonic/supersonic
         """
-        # Get velocity at the boundary face
         face_idx = self.face_index
         u = state.u[face_idx]
 
-        # Get sound speed from adjacent cell
         cell_idx = self.cell_index
         c = state.c[cell_idx]
 
         mach = abs(u) / c if c > 0 else 0.0
 
-        # Determine if flow is leaving (outflow) or entering (inflow) the domain
         if self._side == BoundarySide.LEFT:
-            # Left boundary: u < 0 means outflow (leaving through left)
             is_outflow = u < 0
         else:
-            # Right boundary: u > 0 means outflow (leaving through right)
             is_outflow = u > 0
 
         if mach >= 1.0:
-            # Supersonic
             if is_outflow:
                 return FlowRegime.SUPERSONIC_OUTFLOW
             else:
                 return FlowRegime.SUPERSONIC_INFLOW
         else:
-            # Subsonic
             if is_outflow:
                 return FlowRegime.SUBSONIC_OUTFLOW
             else:
                 return FlowRegime.SUBSONIC_INFLOW
 
-    def apply(
+    def apply_velocity(
         self,
         state: FlowState,
         grid: LagrangianGrid,
         t: float,
     ) -> None:
         """
-        Apply open boundary condition based on flow regime.
+        Set boundary velocity based on flow regime.
 
         Reference: [Poinsot1992] Section 3.2
         """
         regime = self.determine_regime(state)
-        idx = self.cell_index
         face_idx = self.face_index
 
         if regime == FlowRegime.SUPERSONIC_OUTFLOW:
-            # All characteristics outgoing - extrapolate everything
-            # Boundary velocity from interior
+            # Extrapolate from interior
             if self._side == BoundarySide.LEFT:
                 state.u[face_idx] = 2 * state.u[1] - state.u[2]
             else:
                 state.u[face_idx] = 2 * state.u[-2] - state.u[-3]
 
         elif regime == FlowRegime.SUPERSONIC_INFLOW:
-            # All characteristics incoming - specify everything
+            # Use specified external velocity
             if self._u_external is not None:
                 state.u[face_idx] = self._u_external
 
         elif regime == FlowRegime.SUBSONIC_OUTFLOW:
-            # One characteristic incoming (pressure wave)
-            # Extrapolate velocity, use specified external pressure
-            # The pressure is handled in compute_flux
+            # Extrapolate velocity
             if self._side == BoundarySide.LEFT:
-                state.u[face_idx] = state.u[1]  # First order extrapolation
+                state.u[face_idx] = state.u[1]
             else:
                 state.u[face_idx] = state.u[-2]
 
         else:  # SUBSONIC_INFLOW
-            # Two characteristics incoming (entropy and one acoustic)
-            # Specify velocity and one thermodynamic quantity
             if self._u_external is not None:
                 state.u[face_idx] = self._u_external
             else:
-                # Extrapolate if not specified
                 if self._side == BoundarySide.LEFT:
                     state.u[face_idx] = state.u[1]
                 else:
                     state.u[face_idx] = state.u[-2]
+
+    def apply_momentum(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        d_u: np.ndarray,
+        sigma: np.ndarray,
+        t: float,
+    ) -> None:
+        """
+        Compute d_u at open boundary.
+
+        Uses the cell-centered stress σ for consistency with interior.
+        The boundary pressure may be specified externally (for inflow/outflow).
+
+        Args:
+            state: Current flow state
+            grid: Lagrangian grid
+            d_u: Momentum rate array (modified at boundary)
+            sigma: Cell-centered total stress [Pa]
+            t: Current time [s]
+        """
+        dm = grid.dm
+        face_idx = self.face_index
+        cell_idx = self.cell_index
+
+        regime = self.determine_regime(state)
+
+        if regime == FlowRegime.SUPERSONIC_OUTFLOW:
+            # All information from interior - extrapolate d_u
+            # Use the interior stress difference pattern
+            if self._side == BoundarySide.LEFT:
+                # d_u[0] based on extrapolated stress
+                dm_face = 0.5 * dm[0]
+                # Use interior stress, assume ghost cell has same stress
+                d_u[face_idx] = -(sigma[0] - sigma[0]) / dm_face  # = 0
+            else:
+                dm_face = 0.5 * dm[-1]
+                d_u[face_idx] = -(sigma[-1] - sigma[-1]) / dm_face  # = 0
+
+        elif regime == FlowRegime.SUPERSONIC_INFLOW:
+            # All information from exterior
+            # d_u is determined by external state
+            if self._u_external is not None:
+                # Velocity is prescribed, d_u = 0 for constant inflow
+                d_u[face_idx] = 0.0
+            else:
+                d_u[face_idx] = 0.0
+
+        elif regime == FlowRegime.SUBSONIC_OUTFLOW:
+            # Pressure from exterior, velocity extrapolated
+            if self._p_external is not None:
+                p_ext = self._p_external
+            else:
+                p_ext = state.p[cell_idx]
+
+            # Compute d_u using external pressure as "ghost" stress
+            if self._side == BoundarySide.LEFT:
+                dm_face = 0.5 * dm[0]
+                # Ghost stress = external pressure (no AV outside domain)
+                d_u[face_idx] = -(sigma[0] - p_ext) / dm_face
+            else:
+                dm_face = 0.5 * dm[-1]
+                d_u[face_idx] = -(p_ext - sigma[-1]) / dm_face
+
+        else:  # SUBSONIC_INFLOW
+            # Velocity specified, pressure from characteristic
+            if self._p_external is not None:
+                p_ext = self._p_external
+            else:
+                # Use acoustic approximation
+                rho = state.rho[cell_idx]
+                c = state.c[cell_idx]
+                u_int = state.u[face_idx]
+                u_ext = self._u_external if self._u_external else u_int
+
+                if self._side == BoundarySide.LEFT:
+                    p_ext = state.p[cell_idx] + rho * c * (u_ext - u_int)
+                else:
+                    p_ext = state.p[cell_idx] - rho * c * (u_ext - u_int)
+
+            # Compute d_u
+            if self._side == BoundarySide.LEFT:
+                dm_face = 0.5 * dm[0]
+                d_u[face_idx] = -(sigma[0] - p_ext) / dm_face
+            else:
+                dm_face = 0.5 * dm[-1]
+                d_u[face_idx] = -(p_ext - sigma[-1]) / dm_face
+
+    # Legacy interface
+    def apply(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """LEGACY: Use apply_velocity()."""
+        self.apply_velocity(state, grid, t)
 
     def compute_flux(
         self,
@@ -212,75 +283,16 @@ class OpenBC(BoundaryCondition):
         grid: LagrangianGrid,
         t: float,
     ) -> BoundaryFlux:
-        """
-        Compute numerical flux at open boundary.
-
-        Uses characteristic-based non-reflecting condition.
-
-        Reference: [Poinsot1992] Section 3.2, Equations (29)-(34)
-        """
+        """LEGACY: Compute flux for open boundary."""
         regime = self.determine_regime(state)
         cell_idx = self.cell_index
         p_int = state.p[cell_idx]
-        rho_int = state.rho[cell_idx]
-        c_int = state.c[cell_idx]
-
-        # Interior velocity at boundary face
-        face_idx = self.face_index
-        u_int = state.u[face_idx]
-
-        if regime == FlowRegime.SUPERSONIC_OUTFLOW:
-            # All information from interior
-            p_bdry = p_int
-            u_bdry = u_int
-
-        elif regime == FlowRegime.SUPERSONIC_INFLOW:
-            # All information from exterior
-            if self._p_external is None:
-                raise ValueError("p_external required for supersonic inflow")
-            if self._u_external is None:
-                raise ValueError("u_external required for supersonic inflow")
-            p_bdry = self._p_external
-            u_bdry = self._u_external
-
-        elif regime == FlowRegime.SUBSONIC_OUTFLOW:
-            # Pressure from exterior, velocity extrapolated
-            if self._p_external is None:
-                # If not specified, extrapolate
-                p_bdry = p_int
-            else:
-                # Use NSCBC-style characteristic relation
-                # The outgoing wave carries velocity information
-                p_bdry = self._p_external
-                # Adjust velocity using characteristic relation
-                # L1 = (u - c)(∂p/∂x - ρc ∂u/∂x) for left-running acoustic
-                # At steady state, use simple extrapolation
-            u_bdry = u_int
-
-        else:  # SUBSONIC_INFLOW
-            # Velocity and one thermo variable from exterior
-            if self._u_external is not None:
-                u_bdry = self._u_external
-            else:
-                u_bdry = u_int
-
-            # Pressure from characteristic relation
-            if self._p_external is not None:
-                p_bdry = self._p_external
-            else:
-                # Use acoustic impedance matching
-                if self._side == BoundarySide.LEFT:
-                    # Left boundary: use L3 = (u+c) characteristic
-                    p_bdry = p_int + rho_int * c_int * (u_bdry - u_int)
-                else:
-                    # Right boundary: use L1 = (u-c) characteristic
-                    p_bdry = p_int - rho_int * c_int * (u_bdry - u_int)
-
-        # Ensure positive pressure
-        p_bdry = max(p_bdry, 1e-10)
-
-        # Boundary velocity for position update
         u_face = state.u[self.face_index]
+
+        if regime in [FlowRegime.SUPERSONIC_OUTFLOW, FlowRegime.SUBSONIC_OUTFLOW]:
+            p_bdry = self._p_external if self._p_external else p_int
+        else:
+            p_bdry = self._p_external if self._p_external else p_int
 
         return BoundaryFlux(
             p_flux=p_bdry,
@@ -288,22 +300,12 @@ class OpenBC(BoundaryCondition):
             u_flux=u_face,
         )
 
-    def get_boundary_velocity(self, t: float) -> float:
-        """
-        Get boundary velocity.
-
-        For open boundaries, this returns the external velocity if specified,
-        otherwise returns 0 (will be updated by apply()).
-        """
-        return self._u_external if self._u_external is not None else 0.0
-
 
 class OutflowBC(OpenBC):
     """
     Simplified outflow boundary condition.
 
-    Assumes subsonic outflow and allows specifying only back pressure.
-    All other quantities are extrapolated from the interior.
+    Assumes subsonic outflow with specified back pressure.
     """
 
     def __init__(
@@ -332,7 +334,7 @@ class InflowBC(OpenBC):
     """
     Simplified inflow boundary condition.
 
-    Assumes subsonic inflow with specified total conditions.
+    Assumes subsonic inflow with specified conditions.
     """
 
     def __init__(

@@ -7,7 +7,12 @@ from lagrangian_solver.numerics.riemann import (
     ExactRiemannSolver,
     HLLCRiemannSolver,
 )
-from lagrangian_solver.numerics.time_integration import HeunIntegrator
+from lagrangian_solver.numerics.time_integration import (
+    HeunIntegrator,
+    CompatibleHeunIntegrator,
+    CompatibleForwardEulerIntegrator,
+    CompatibleSSPRK3Integrator,
+)
 from lagrangian_solver.numerics.artificial_viscosity import (
     ArtificialViscosity,
     ArtificialViscosityConfig,
@@ -20,6 +25,9 @@ __all__ = [
     "ExactRiemannSolver",
     "HLLCRiemannSolver",
     "HeunIntegrator",
+    "CompatibleHeunIntegrator",
+    "CompatibleForwardEulerIntegrator",
+    "CompatibleSSPRK3Integrator",
     "ArtificialViscosity",
     "ArtificialViscosityConfig",
 ]
