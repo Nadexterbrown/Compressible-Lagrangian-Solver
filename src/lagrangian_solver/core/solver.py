@@ -63,15 +63,9 @@ class SolverConfig:
         dt_max: Maximum time step [s] (None for no limit)
         dt_min: Minimum time step floor [s] (None for no floor)
         verbose: Print progress messages
-        av_linear: Linear AV coefficient (Landshoff, default 0.1)
-        av_quad: Quadratic AV coefficient (VNR, default 0.5)
+        av_linear: Linear AV coefficient (Landshoff, default 0.3)
+        av_quad: Quadratic AV coefficient (VNR, default 2.0)
         av_enabled: Whether artificial viscosity is enabled (default True)
-
-    Note:
-        Default AV coefficients (0.1, 0.5) are lower than traditional values
-        (0.3, 2.0) to prevent excessive heating at piston boundaries during
-        shock formation. Higher values can cause 15%+ density errors at
-        boundary-adjacent cells due to over-dissipation.
     """
 
     cfl: float = 0.5
@@ -80,8 +74,8 @@ class SolverConfig:
     dt_max: Optional[float] = None
     dt_min: Optional[float] = None
     verbose: bool = True
-    av_linear: float = 0.1
-    av_quad: float = 0.5
+    av_linear: float = 0.3
+    av_quad: float = 2.0
     av_enabled: bool = True
 
     # Legacy field for backward compatibility

@@ -208,11 +208,26 @@ def exact_piston_solution_sdtoolbox(
     t: float,
     x_piston_0: float,
     shock_state: dict,
+    ramp_time: float = 30e-6,
 ) -> tuple:
     """
     Compute exact solution for piston-driven shock at time t using SDToolbox results.
 
     The piston starts at x_piston_0 and moves right, creating a shock.
+    Accounts for velocity ramping during shock formation.
+
+    The piston velocity profile is:
+        v(t) = u_p * (t / ramp_time)  for t < ramp_time
+        v(t) = u_p                     for t >= ramp_time
+
+    The shock position is computed from mass conservation:
+        x_shock = x_piston * D / u_p
+
+    This relationship holds because:
+        - Mass swept by shock = rho1 * x_shock
+        - Mass compressed behind shock = rho2 * (x_shock - x_piston)
+        - Mass conservation: rho1 * x_shock = rho2 * (x_shock - x_piston)
+        - Combined with u_p = D * (1 - rho1/rho2) gives x_shock = x_piston * D/u_p
 
     Args:
         x: Position array [m]
@@ -220,6 +235,7 @@ def exact_piston_solution_sdtoolbox(
         x_piston_0: Initial piston position [m]
         shock_state: Dictionary from compute_post_shock_state_sdtoolbox containing:
             rho1, rho2, p1, p2, e1, e2, D, u_p
+        ramp_time: Time to ramp piston velocity from 0 to u_p [s] (default 30e-6)
 
     Returns:
         (rho, u, p, e, x_piston, x_shock) arrays/values
@@ -234,9 +250,33 @@ def exact_piston_solution_sdtoolbox(
     D = shock_state["D"]
     u_p = shock_state["u_p"]
 
-    # Current positions
-    x_piston = x_piston_0 + u_p * t
-    x_shock = x_piston_0 + D * t
+    # Compute piston position with ramped velocity
+    # v(t) = u_p * min(t/ramp_time, 1)
+    # x_piston = integral of v(t') from 0 to t
+    if ramp_time > 0 and t < ramp_time:
+        # During ramp: x = integral(u_p * t'/ramp_time, 0, t) = u_p * t^2 / (2*ramp_time)
+        x_piston = x_piston_0 + u_p * t**2 / (2 * ramp_time)
+    elif ramp_time > 0:
+        # After ramp: x = x(ramp_time) + u_p * (t - ramp_time)
+        # x(ramp_time) = u_p * ramp_time / 2
+        x_piston = x_piston_0 + u_p * ramp_time / 2 + u_p * (t - ramp_time)
+        # Simplify: x_piston = x_piston_0 + u_p * (t - ramp_time/2)
+    else:
+        # No ramp
+        x_piston = x_piston_0 + u_p * t
+
+    # Shock position from mass conservation: x_shock = x_piston * D / u_p
+    # This holds because u_p = D * (1 - rho1/rho2)
+    if u_p > 0:
+        x_shock = x_piston_0 + (x_piston - x_piston_0) * D / u_p
+    else:
+        x_shock = x_piston_0  # No shock for u_p = 0
+
+    # Current piston velocity (accounts for ramp)
+    if ramp_time > 0 and t < ramp_time:
+        u_piston_current = u_p * t / ramp_time
+    else:
+        u_piston_current = u_p
 
     # Initialize with pre-shock state
     rho = np.full_like(x, rho1)
@@ -245,9 +285,11 @@ def exact_piston_solution_sdtoolbox(
     e = np.full_like(x, e1)
 
     # Post-shock region: between piston and shock
+    # Note: During ramp, this is an approximation - the shock is still forming
+    # and the post-shock state varies. After ramp, it's the steady shock solution.
     post_shock = (x >= x_piston) & (x < x_shock)
     rho[post_shock] = rho2
-    u[post_shock] = u_p  # Post-shock particle velocity = piston velocity
+    u[post_shock] = u_piston_current  # Post-shock velocity = current piston velocity
     p[post_shock] = p2
     e[post_shock] = e2
 
@@ -340,6 +382,7 @@ def run_piston_test(
     cfl: float = 0.5,
     dt_min: float = None,
     av_config: ArtificialViscosityConfig = None,
+    ramp_time: float = 30e-6,
 ):
     """
     Run a piston shock test and return numerical solution.
@@ -352,6 +395,7 @@ def run_piston_test(
         cfl: CFL number
         dt_min: Minimum time step floor
         av_config: Artificial viscosity configuration
+        ramp_time: Piston velocity ramp time [s]
 
     Returns:
         Tuple of (state, grid, stats, failed, error_msg)
@@ -377,11 +421,12 @@ def run_piston_test(
     # Create Riemann solver
     riemann_solver = ExactRiemannSolver(eos, tol=1e-8, max_iter=100)
 
-    # Left BC: Moving piston
+    # Left BC: Moving piston with velocity ramp
     bc_left = MovingPistonBC(
         side=BoundarySide.LEFT,
         eos=eos,
         velocity=u_piston,
+        ramp_time=ramp_time,
     )
 
     # Right BC: Open (outflow to undisturbed gas)
@@ -459,6 +504,7 @@ def plot_piston_test(
     cfl: float = 0.5,
     dt_min: float = None,
     av_config: ArtificialViscosityConfig = None,
+    ramp_time: float = 30e-6,
 ):
     """
     Plot exact vs numerical comparison for a piston shock test.
@@ -472,6 +518,7 @@ def plot_piston_test(
         cfl: CFL number
         dt_min: Optional minimum time step floor
         av_config: Artificial viscosity configuration
+        ramp_time: Piston velocity ramp time [s]
     """
     test_data = PISTON_TESTS[test_num]
     M_s = test_data["M_s"]
@@ -483,7 +530,7 @@ def plot_piston_test(
     # Get numerical solution
     state, grid, stats, failed, error_msg = run_piston_test(
         test_num, eos, shock_state, n_cells=n_cells, cfl=cfl,
-        dt_min=dt_min, av_config=av_config
+        dt_min=dt_min, av_config=av_config, ramp_time=ramp_time
     )
 
     if failed:
@@ -493,10 +540,10 @@ def plot_piston_test(
     else:
         t_plot = t_end
 
-    # Compute exact solution using SDToolbox shock state
+    # Compute exact solution using SDToolbox shock state (with ramp)
     x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
     rho_exact, u_exact, p_exact, e_exact, x_piston, x_shock = exact_piston_solution_sdtoolbox(
-        x_exact, t_plot, 0.0, shock_state
+        x_exact, t_plot, 0.0, shock_state, ramp_time=ramp_time
     )
 
     # Numerical solution
@@ -582,6 +629,7 @@ def create_summary_comparison(
     eos: CanteraEOS,
     shock_states: dict,
     dt_min: float = None,
+    ramp_time: float = 30e-6,
 ):
     """
     Create a summary figure comparing all piston shock tests.
@@ -591,6 +639,7 @@ def create_summary_comparison(
         eos: Cantera equation of state
         shock_states: Dictionary mapping test_num -> shock_state from SDToolbox
         dt_min: Minimum time step floor
+        ramp_time: Piston velocity ramp time [s]
     """
     fig, axes = plt.subplots(4, 4, figsize=(16, 14))
 
@@ -601,15 +650,15 @@ def create_summary_comparison(
 
         # Get numerical solution
         state, grid, stats, failed, error_msg = run_piston_test(
-            test_num, eos, shock_state, dt_min=dt_min
+            test_num, eos, shock_state, dt_min=dt_min, ramp_time=ramp_time
         )
 
         t_plot = stats.final_time if failed else t_end
 
-        # Compute exact solution using SDToolbox
+        # Compute exact solution using SDToolbox (with ramp)
         x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
         rho_exact, u_exact, p_exact, e_exact, _, _ = exact_piston_solution_sdtoolbox(
-            x_exact, t_plot, 0.0, shock_state
+            x_exact, t_plot, 0.0, shock_state, ramp_time=ramp_time
         )
 
         # Numerical solution
@@ -689,6 +738,10 @@ def parse_args():
         "--tests", type=str, default="1,2,3,4",
         help="Comma-separated list of tests to run (default: 1,2,3,4)"
     )
+    parser.add_argument(
+        "--ramp-time", type=float, default=30e-6,
+        help="Piston velocity ramp time [s] (default: 30e-6)"
+    )
     return parser.parse_args()
 
 
@@ -749,6 +802,7 @@ def main():
     print("=" * 70)
     print(f"Configuration: {args.description}")
     print(f"  N_cells: {args.n_cells}, CFL: {args.cfl}, dt_min: {args.dt_min:.0e}")
+    print(f"  Ramp time: {args.ramp_time*1e6:.1f} us")
     if args.av:
         print(f"  AV: c_linear={args.av_linear}, c_quad={args.av_quad}")
     print(f"Output: {output_manager.output_dir}")
@@ -780,7 +834,7 @@ def main():
         plot_piston_test(
             test_num, output_manager, eos, shock_states[test_num],
             n_cells=args.n_cells, cfl=args.cfl, dt_min=args.dt_min,
-            av_config=av_config
+            av_config=av_config, ramp_time=args.ramp_time
         )
         print()
 

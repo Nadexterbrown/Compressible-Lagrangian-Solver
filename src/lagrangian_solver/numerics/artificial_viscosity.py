@@ -1,9 +1,7 @@
 """
-Linear and quadratic artificial viscosity for shock capturing.
+Artificial viscosity for shock capturing in Lagrangian hydrodynamics.
 
-This module implements combined linear (Landshoff) and quadratic (Von Neumann-
-Richtmyer) artificial viscosity for capturing shocks in Lagrangian hydrodynamics
-simulations.
+Implements the Von Neumann-Richtmyer + Landshoff artificial viscosity formulation.
 
 References:
     [VNR1950] Von Neumann, J. & Richtmyer, R.D. (1950). "A method for the
