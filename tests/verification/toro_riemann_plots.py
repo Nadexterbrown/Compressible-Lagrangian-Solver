@@ -287,7 +287,7 @@ def plot_toro_test_comparison(
     status_str = "FAILED" if failed else ""
     title_lines = [f"Toro Test {test_num}: {test_data['name']} {status_str}"]
     t_reached = stats.final_time
-    title_lines.append(f"t = {t_reached:.4e} / {test_data['t_end']}, N = {N_CELLS} cells, steps = {stats.n_steps}")
+    title_lines.append(f"t = {t_reached:.4e} / {test_data['t_end']}, N = {n_cells} cells, steps = {stats.n_steps}")
     if dt_min:
         min_dt_str = f"{stats.min_dt:.2e}" if stats.min_dt < float('inf') else "N/A"
         title_lines.append(f"dt_min = {dt_min:.0e} (min_dt used: {min_dt_str})")
