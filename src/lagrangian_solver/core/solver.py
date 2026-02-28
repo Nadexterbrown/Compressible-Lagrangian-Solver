@@ -48,6 +48,10 @@ from lagrangian_solver.numerics.artificial_viscosity import (
     ArtificialViscosity,
     ArtificialViscosityConfig,
 )
+from lagrangian_solver.numerics.artificial_heat_conduction import (
+    ArtificialHeatConduction,
+    ArtificialHeatConductionConfig,
+)
 from lagrangian_solver.boundary.base import BoundaryCondition
 
 
@@ -66,6 +70,10 @@ class SolverConfig:
         av_linear: Linear AV coefficient (Landshoff, default 0.3)
         av_quad: Quadratic AV coefficient (VNR, default 2.0)
         av_enabled: Whether artificial viscosity is enabled (default True)
+        hc_linear: Linear HC coefficient (oscillation damping, default 0.1)
+        hc_quad: Quadratic HC coefficient (contact width, default 0.5)
+        hc_density_switch: Use density gradient as activation switch (default True)
+        hc_enabled: Whether artificial heat conduction is enabled (default False)
     """
 
     cfl: float = 0.5
@@ -77,6 +85,10 @@ class SolverConfig:
     av_linear: float = 0.3
     av_quad: float = 2.0
     av_enabled: bool = True
+    hc_linear: float = 0.1
+    hc_quad: float = 0.5
+    hc_density_switch: bool = True
+    hc_enabled: bool = False
 
     # Legacy field for backward compatibility
     artificial_viscosity: Optional[ArtificialViscosityConfig] = None
@@ -173,8 +185,20 @@ class CompatibleLagrangianSolver:
         else:
             self._av = None
 
+        # Create artificial heat conduction
+        if self._config.hc_enabled:
+            hc_config = ArtificialHeatConductionConfig(
+                kappa_linear=self._config.hc_linear,
+                kappa_quad=self._config.hc_quad,
+                use_density_switch=self._config.hc_density_switch,
+                enabled=True,
+            )
+            self._hc = ArtificialHeatConduction(hc_config)
+        else:
+            self._hc = None
+
         # Create conservation law handler (compatible discretization)
-        self._conservation = CompatibleConservation(eos, self._av)
+        self._conservation = CompatibleConservation(eos, self._av, self._hc)
 
         # Create time integrator (compatible - evolves internal energy)
         self._integrator = CompatibleHeunIntegrator(eos, cfl=self._config.cfl)

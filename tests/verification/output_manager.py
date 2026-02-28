@@ -34,6 +34,9 @@ class TestConfig:
         av_enabled: Whether artificial viscosity is enabled
         av_c_linear: AV linear coefficient (if enabled)
         av_c_quad: AV quadratic coefficient (if enabled)
+        hc_enabled: Whether artificial heat conduction is enabled
+        hc_linear: HC linear coefficient (if enabled)
+        hc_quad: HC quadratic coefficient (if enabled)
         extra: Additional configuration parameters
     """
     test_type: str
@@ -45,6 +48,9 @@ class TestConfig:
     av_enabled: bool = False
     av_c_linear: float = 0.0
     av_c_quad: float = 0.0
+    hc_enabled: bool = False
+    hc_linear: float = 0.0
+    hc_quad: float = 0.0
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # Filled in automatically
@@ -275,6 +281,9 @@ def create_output_manager(
     av_enabled: bool = False,
     av_c_linear: float = 0.0,
     av_c_quad: float = 0.0,
+    hc_enabled: bool = False,
+    hc_linear: float = 0.0,
+    hc_quad: float = 0.0,
     base_dir: Path = None,
     **extra
 ) -> OutputManager:
@@ -291,6 +300,9 @@ def create_output_manager(
         av_enabled: Whether artificial viscosity is enabled
         av_c_linear: AV linear coefficient
         av_c_quad: AV quadratic coefficient
+        hc_enabled: Whether artificial heat conduction is enabled
+        hc_linear: HC linear coefficient
+        hc_quad: HC quadratic coefficient
         base_dir: Base output directory (default: tests/verification/output)
         **extra: Additional configuration parameters
 
@@ -310,6 +322,9 @@ def create_output_manager(
         av_enabled=av_enabled,
         av_c_linear=av_c_linear,
         av_c_quad=av_c_quad,
+        hc_enabled=hc_enabled,
+        hc_linear=hc_linear,
+        hc_quad=hc_quad,
         extra=extra if extra else {},
     )
 

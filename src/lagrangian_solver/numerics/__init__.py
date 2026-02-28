@@ -1,4 +1,4 @@
-"""Numerics module containing Riemann solvers, time integration, and artificial viscosity."""
+"""Numerics module containing Riemann solvers, time integration, and artificial viscosity/heat conduction."""
 
 from lagrangian_solver.numerics.riemann import (
     RiemannState,
@@ -17,6 +17,10 @@ from lagrangian_solver.numerics.artificial_viscosity import (
     ArtificialViscosity,
     ArtificialViscosityConfig,
 )
+from lagrangian_solver.numerics.artificial_heat_conduction import (
+    ArtificialHeatConduction,
+    ArtificialHeatConductionConfig,
+)
 from lagrangian_solver.numerics.boundary_riemann import (
     BoundaryRiemannSolver,
     BoundaryState,
@@ -34,6 +38,8 @@ __all__ = [
     "CompatibleSSPRK3Integrator",
     "ArtificialViscosity",
     "ArtificialViscosityConfig",
+    "ArtificialHeatConduction",
+    "ArtificialHeatConductionConfig",
     "BoundaryRiemannSolver",
     "BoundaryState",
 ]

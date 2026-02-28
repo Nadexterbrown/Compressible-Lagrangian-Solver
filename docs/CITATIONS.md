@@ -183,3 +183,18 @@ For expansion (rarefaction), uses isentropic relation:
 **Used in**: Design reference for compatible Lagrangian solver architecture
 
 **Description**: Open-source reference implementation of 1D Lagrangian gas dynamics with compatible energy discretization. Used as architectural reference for the solver design, particularly the treatment of staggered variables and boundary conditions.
+
+### Artificial Heat Flux for Contact Discontinuity Spreading
+
+**Reference**: Noh, W.F. (1987). "Errors for calculations of strong shocks using an artificial viscosity and an artificial heat flux." *Journal of Computational Physics*, 72(1), 78-120. DOI: 10.1016/0021-9991(87)90074-X
+
+**Used in**: `src/lagrangian_solver/numerics/artificial_heat_conduction.py`
+
+**Description**: Artificial heat conduction for spreading contact discontinuities in Lagrangian hydrodynamics. Analogous to artificial viscosity for shocks, artificial heat flux smooths contact discontinuities (density jumps with constant pressure) over several cells. The formulation uses density gradient as the activation switch:
+
+- Linear term: κ_lin = κ₁ × ρ × c × dx × |d(ln ρ)/dx| (damps oscillations)
+- Quadratic term: κ_quad = κ₂ × ρ × dx² × |d(ln ρ)/dx|² (controls contact width)
+
+The conservative divergence form ensures exact energy conservation:
+    de/dt = -σ × dτ/dt - dq/dm
+where q = -κ × dT/dx is the heat flux at cell faces.

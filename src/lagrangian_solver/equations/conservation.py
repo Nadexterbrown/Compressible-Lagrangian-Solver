@@ -57,6 +57,7 @@ from lagrangian_solver.equations.eos import EOSBase
 
 if TYPE_CHECKING:
     from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosity
+    from lagrangian_solver.numerics.artificial_heat_conduction import ArtificialHeatConduction
     from lagrangian_solver.boundary.base import BoundaryCondition
 
 
@@ -79,6 +80,7 @@ class CompatibleConservation:
         self,
         eos: EOSBase,
         artificial_viscosity: "ArtificialViscosity" = None,
+        artificial_heat_conduction: "ArtificialHeatConduction" = None,
     ):
         """
         Initialize compatible conservation law solver.
@@ -86,9 +88,12 @@ class CompatibleConservation:
         Args:
             eos: Equation of state
             artificial_viscosity: Optional artificial viscosity for shock capturing
+            artificial_heat_conduction: Optional artificial heat conduction for
+                                        contact discontinuity spreading
         """
         self._eos = eos
         self._artificial_viscosity = artificial_viscosity
+        self._artificial_heat_conduction = artificial_heat_conduction
 
     @property
     def eos(self) -> EOSBase:
@@ -99,6 +104,11 @@ class CompatibleConservation:
     def artificial_viscosity(self) -> "ArtificialViscosity":
         """Artificial viscosity for shock capturing (may be None)."""
         return self._artificial_viscosity
+
+    @property
+    def artificial_heat_conduction(self) -> "ArtificialHeatConduction":
+        """Artificial heat conduction for contact spreading (may be None)."""
+        return self._artificial_heat_conduction
 
     def compute_stress(self, state: FlowState, grid: LagrangianGrid) -> np.ndarray:
         """
@@ -220,7 +230,14 @@ class CompatibleConservation:
         # This maintains compatible energy discretization.
         d_e = -sigma * d_tau
 
-        # 6. Position rate: dx/dt = u
+        # 6. Add artificial heat conduction contribution if enabled
+        # de/dt = -σ * dτ/dt - dq/dm
+        # Reference: [Noh1987], maintains energy conservation
+        if self._artificial_heat_conduction is not None:
+            d_e_heat = self._artificial_heat_conduction.compute_energy_source(state, grid)
+            d_e = d_e + d_e_heat
+
+        # 7. Position rate: dx/dt = u
         d_x = u.copy()
 
         return d_tau, d_u, d_e, d_x
