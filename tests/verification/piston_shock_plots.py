@@ -382,6 +382,9 @@ def run_piston_test(
     cfl: float = 0.5,
     dt_min: float = None,
     av_config: ArtificialViscosityConfig = None,
+    hc_enabled: bool = False,
+    hc_linear: float = 0.2,
+    hc_quad: float = 1.0,
     ramp_time: float = 30e-6,
 ):
     """
@@ -395,6 +398,9 @@ def run_piston_test(
         cfl: CFL number
         dt_min: Minimum time step floor
         av_config: Artificial viscosity configuration
+        hc_enabled: Enable artificial heat conduction
+        hc_linear: HC linear coefficient
+        hc_quad: HC quadratic coefficient
         ramp_time: Piston velocity ramp time [s]
 
     Returns:
@@ -446,6 +452,9 @@ def run_piston_test(
         dt_min=dt_min,
         verbose=False,
         artificial_viscosity=av_config,
+        hc_enabled=hc_enabled,
+        hc_linear=hc_linear,
+        hc_quad=hc_quad,
     )
 
     # Create solver
@@ -504,6 +513,9 @@ def plot_piston_test(
     cfl: float = 0.5,
     dt_min: float = None,
     av_config: ArtificialViscosityConfig = None,
+    hc_enabled: bool = False,
+    hc_linear: float = 0.2,
+    hc_quad: float = 1.0,
     ramp_time: float = 30e-6,
 ):
     """
@@ -530,7 +542,8 @@ def plot_piston_test(
     # Get numerical solution
     state, grid, stats, failed, error_msg = run_piston_test(
         test_num, eos, shock_state, n_cells=n_cells, cfl=cfl,
-        dt_min=dt_min, av_config=av_config, ramp_time=ramp_time
+        dt_min=dt_min, av_config=av_config, hc_enabled=hc_enabled,
+        hc_linear=hc_linear, hc_quad=hc_quad, ramp_time=ramp_time
     )
 
     if failed:
@@ -731,6 +744,18 @@ def parse_args():
         help="AV quadratic coefficient (default: 2.0)"
     )
     parser.add_argument(
+        "--hc", action="store_true",
+        help="Enable artificial heat conduction for contact discontinuity spreading"
+    )
+    parser.add_argument(
+        "--hc-linear", type=float, default=0.2,
+        help="HC linear coefficient (default: 0.2)"
+    )
+    parser.add_argument(
+        "--hc-quad", type=float, default=1.0,
+        help="HC quadratic coefficient (default: 1.0)"
+    )
+    parser.add_argument(
         "--description", type=str, default="",
         help="Description for this test run"
     )
@@ -766,6 +791,8 @@ def main():
             parts.append(f"av_clin{args.av_linear}_cq{args.av_quad}")
         else:
             parts.append("first_order")
+        if args.hc:
+            parts.append(f"hc_kl{args.hc_linear}_kq{args.hc_quad}")
         args.description = "_".join(parts)
 
     # Create artificial viscosity config if enabled
@@ -787,6 +814,9 @@ def main():
         av_enabled=args.av,
         av_c_linear=args.av_linear if args.av else 0.0,
         av_c_quad=args.av_quad if args.av else 0.0,
+        hc_enabled=args.hc,
+        hc_linear=args.hc_linear if args.hc else 0.0,
+        hc_quad=args.hc_quad if args.hc else 0.0,
         domain_length=DOMAIN_LENGTH,
         T_STP=T_STP,
         P_STP=P_STP,
@@ -805,6 +835,8 @@ def main():
     print(f"  Ramp time: {args.ramp_time*1e6:.1f} us")
     if args.av:
         print(f"  AV: c_linear={args.av_linear}, c_quad={args.av_quad}")
+    if args.hc:
+        print(f"  HC: kappa_linear={args.hc_linear}, kappa_quad={args.hc_quad}")
     print(f"Output: {output_manager.output_dir}")
     print("=" * 70 + "\n")
 
@@ -834,7 +866,8 @@ def main():
         plot_piston_test(
             test_num, output_manager, eos, shock_states[test_num],
             n_cells=args.n_cells, cfl=args.cfl, dt_min=args.dt_min,
-            av_config=av_config, ramp_time=args.ramp_time
+            av_config=av_config, hc_enabled=args.hc, hc_linear=args.hc_linear,
+            hc_quad=args.hc_quad, ramp_time=args.ramp_time
         )
         print()
 
