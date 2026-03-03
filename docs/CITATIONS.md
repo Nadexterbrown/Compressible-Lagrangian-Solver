@@ -198,3 +198,50 @@ For expansion (rarefaction), uses isentropic relation:
 The conservative divergence form ensures exact energy conservation:
     de/dt = -σ × dτ/dt - dq/dm
 where q = -κ × dT/dx is the heat flux at cell faces.
+
+### Riemann-Based Ghost Cell Boundary Condition for Piston Problems
+
+**Reference**: Toro, E.F. (2009). "Riemann Solvers and Numerical Methods for Fluid Dynamics", 3rd Ed., Springer, Section 6.3.
+
+**Reference**: Burton, D.E. (1992). Conservation of energy, momentum, and angular momentum in Lagrangian staggered-grid hydrodynamics. *Lawrence Livermore National Laboratory Report UCRL-JC-105926*.
+
+**Used in**:
+- `src/lagrangian_solver/boundary/piston.py:571-831` - RiemannGhostPistonBC class
+- `src/lagrangian_solver/equations/conservation.py:179-219` - Ghost cell stress in momentum equation
+- `tests/verification/piston_shock_plots.py:431-436` - BC usage
+
+**Description**: For piston-driven flows, the `RiemannGhostPistonBC` solves the boundary Riemann problem to obtain the correct wall pressure. This interface stress is used in the momentum equation for the first interior face, which then correctly propagates to the energy equation via the compatible formulation `d_e = -σ × dτ`.
+
+Key insight: The compatible energy discretization works correctly **without explicit energy correction** when the momentum equation properly handles the boundary stress. Direct energy correction at the boundary was found to cause energy overshoot due to cumulative effects.
+
+### Flame-Coupled Piston Velocity (Clavin-Tofaili Formulation)
+
+**Reference**: Clavin, P., & Tofaili, H. (2021). Theory of flame-driven piston motion in confined combustion.
+
+**Used in**:
+- `scripts/flame_elongation_trajectory/flame_property_interpolator.py` - 2D P-T flame property interpolation
+- `scripts/flame_elongation_trajectory/flame_elongation_trajectory.py` - Elongation functions σ(t)
+- `scripts/flame_elongation_trajectory/flame_coupled_piston_bc.py` - Iterative BC implementation
+- `scripts/flame_elongation_trajectory/test_flame_coupled_piston.py` - Verification tests
+
+**Description**: Implements the Clavin-Tofaili flame elongation model for piston velocity:
+
+    u_p = (σ(t) - 1) × (ρ_u / ρ_b) × S_L
+
+where:
+- σ(t) is an imposed elongation function (power law, exponential, linear)
+- ρ_u / ρ_b is the unburned-to-burned density ratio
+- S_L is the laminar flame speed
+
+The challenge is that S_L and density ratio depend on local (P, T) at the piston face, but (P, T) depend on u_p through shock relations. This creates a nonlinear coupling requiring iteration at each timestep.
+
+The implementation uses:
+1. `FlamePropertyInterpolator` - 2D RegularGridInterpolator for flame data from Cantera
+2. `FlameCoupledPistonBC` - Iterative boundary condition that solves the coupling via:
+   - Initial guess from uncoupled velocity
+   - Boundary Riemann solver for (P_face, T_face)
+   - Update velocity from Clavin-Tofaili formula
+   - Under-relaxation for stability
+   - Convergence check
+
+Reference: [Toro2009] Section 6.3 for boundary Riemann problem formulation.
