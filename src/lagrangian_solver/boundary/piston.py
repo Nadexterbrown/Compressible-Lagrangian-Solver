@@ -19,7 +19,7 @@ References:
     [GDTk] L1D solver - https://github.com/gdtk-uq/gdtk
 """
 
-from typing import Optional, Callable, Union
+from typing import Optional, Callable, Union, Protocol, runtime_checkable
 import numpy as np
 
 from lagrangian_solver.boundary.base import (
@@ -35,6 +35,24 @@ from lagrangian_solver.equations.eos import EOSBase
 
 # Type alias for velocity profile function
 VelocityProfile = Callable[[float], float]
+
+
+@runtime_checkable
+class TrajectoryInterpolator(Protocol):
+    """
+    Protocol for trajectory interpolators used with MovingDataDrivenPistonBC.
+
+    Any object with position(t) and velocity(t) methods satisfies this protocol.
+    Compatible with PeleTrajectoryInterpolator and SyntheticTrajectoryInterpolator.
+    """
+
+    def position(self, t: float) -> float:
+        """Return position at time t [m]."""
+        ...
+
+    def velocity(self, t: float) -> float:
+        """Return velocity at time t [m/s]."""
+        ...
 
 
 class CompatiblePistonBC(BoundaryCondition):
@@ -62,6 +80,8 @@ class CompatiblePistonBC(BoundaryCondition):
 
     # Default ramp time for smooth shock formation (30 microseconds)
     DEFAULT_RAMP_TIME = 30e-6
+    # Default startup time (delay before ramp begins)
+    DEFAULT_STARTUP_TIME = 0.0
 
     def __init__(
         self,
@@ -71,6 +91,7 @@ class CompatiblePistonBC(BoundaryCondition):
         thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
         piston_temperature: Optional[float] = None,
         ramp_time: Optional[float] = None,
+        startup_time: Optional[float] = None,
     ):
         """
         Initialize compatible piston boundary condition.
@@ -86,11 +107,16 @@ class CompatiblePistonBC(BoundaryCondition):
                       Default is 30e-6 (30 microseconds) to prevent
                       excessive AV heating during shock formation.
                       Set to 0 to disable ramping.
+            startup_time: Delay before ramp begins [s]. Velocity stays
+                         at zero until t = startup_time, then erf ramp starts.
+                         Default is 0 (no delay).
         """
         super().__init__(side, eos)
 
         # Set ramp time (default 30 us for smooth shock formation)
         self._ramp_time = ramp_time if ramp_time is not None else self.DEFAULT_RAMP_TIME
+        # Set startup delay (default 0 - no delay)
+        self._startup_time = startup_time if startup_time is not None else self.DEFAULT_STARTUP_TIME
 
         # Velocity profile with optional ramping
         if callable(velocity):
@@ -114,17 +140,36 @@ class CompatiblePistonBC(BoundaryCondition):
         self._p_wall = None
 
     def _create_ramped_velocity(self) -> VelocityProfile:
-        """Create velocity profile with linear ramp-up."""
+        """Create velocity profile with smooth erf ramp-up.
+
+        Uses error function for smooth S-curve acceleration profile:
+        v(t) = v_target * (1 + erf(6*(t-t_mid)/t_ramp)) / 2
+
+        where t_mid = t_start + t_ramp/2 is the midpoint (inflection point).
+
+        This maps [t_start, t_start+t_ramp] to [-3, +3] in erf space:
+        - At t=t_start: erf(-3) ≈ -0.99998, v ≈ 0 (flat start, zero acceleration)
+        - At t=t_mid: erf(0) = 0, v = v_target/2 (inflection point, max acceleration)
+        - At t=t_start+t_ramp: erf(3) ≈ 0.99998, v ≈ v_target (flat end, zero acceleration)
+
+        This gives the characteristic S-curve with smooth transitions at both ends.
+        """
+        from scipy.special import erf
         t_ramp = self._ramp_time
+        t_start = self._startup_time
         base_func = self._base_velocity_func
 
         def ramped_velocity(t: float) -> float:
             v_target = base_func(t)
-            if t < t_ramp:
-                # Linear ramp from 0 to v_target
-                return v_target * (t / t_ramp)
-            else:
+            if t <= t_start:
+                return 0.0
+            if t >= t_start + t_ramp:
                 return v_target
+            # Map [t_start, t_start+t_ramp] to [-3, +3] for smooth S-curve
+            # Using 6/t_ramp as the scale factor (maps to [-3, 3])
+            t_rel = t - t_start
+            x = 6.0 * (t_rel / t_ramp) - 3.0
+            return v_target * (1.0 + erf(x)) / 2.0
 
         return ramped_velocity
 
@@ -132,6 +177,11 @@ class CompatiblePistonBC(BoundaryCondition):
     def ramp_time(self) -> float:
         """Velocity ramp-up time [s]."""
         return self._ramp_time
+
+    @property
+    def startup_time(self) -> float:
+        """Startup delay before ramp begins [s]."""
+        return self._startup_time
 
     @property
     def thermal_bc(self) -> ThermalBCType:
@@ -447,51 +497,7 @@ class MovingPistonBC(CompatiblePistonBC):
     excessive AV heating at boundaries during shock formation.
     """
 
-    def __init__(
-        self,
-        side: BoundarySide,
-        eos: EOSBase,
-        velocity: Union[float, VelocityProfile],
-        thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
-        piston_temperature: Optional[float] = None,
-        ramp_time: Optional[float] = None,
-        porous: bool = False,
-        permeability: float = 0.0,
-        slip_coefficient: float = 0.0,
-    ):
-        """
-        Initialize moving piston BC.
-
-        Args:
-            side: Which side of the domain (LEFT or RIGHT)
-            eos: Equation of state
-            velocity: Piston velocity [m/s] or function v(t)
-            thermal_bc: Type of thermal boundary condition
-            piston_temperature: Piston temperature [K] (for isothermal)
-            ramp_time: Time to ramp velocity from 0 to target [s].
-                      Default is 30e-6 (30 microseconds).
-                      Set to 0 to disable ramping.
-            porous: DEPRECATED - ignored
-            permeability: DEPRECATED - ignored
-            slip_coefficient: DEPRECATED - ignored
-        """
-        if porous:
-            import warnings
-            warnings.warn(
-                "Porous piston not supported in compatible discretization. "
-                "Ignoring porous parameters.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-        super().__init__(
-            side=side,
-            eos=eos,
-            velocity=velocity,
-            thermal_bc=thermal_bc,
-            piston_temperature=piston_temperature,
-            ramp_time=ramp_time,
-        )
+    pass
 
 
 # Utility functions for creating piston velocity profiles
@@ -595,6 +601,8 @@ class RiemannGhostPistonBC(BoundaryCondition):
 
     # Default ramp time for smooth shock formation (30 microseconds)
     DEFAULT_RAMP_TIME = 30e-6
+    # Default startup time (delay before ramp begins)
+    DEFAULT_STARTUP_TIME = 0.0
 
     def __init__(
         self,
@@ -605,6 +613,7 @@ class RiemannGhostPistonBC(BoundaryCondition):
         thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
         piston_temperature: Optional[float] = None,
         ramp_time: Optional[float] = None,
+        startup_time: Optional[float] = None,
     ):
         """
         Initialize Riemann ghost cell piston BC.
@@ -619,11 +628,16 @@ class RiemannGhostPistonBC(BoundaryCondition):
             ramp_time: Time to ramp velocity from 0 to target [s].
                       Default is 30e-6 (30 microseconds).
                       Set to 0 to disable ramping.
+            startup_time: Delay before ramp begins [s]. Velocity stays
+                         at zero until t = startup_time, then erf ramp starts.
+                         Default is 0 (no delay).
         """
         super().__init__(side, eos)
 
         # Set ramp time (default 30 us for smooth shock formation)
         self._ramp_time = ramp_time if ramp_time is not None else self.DEFAULT_RAMP_TIME
+        # Set startup delay (default 0 - no delay)
+        self._startup_time = startup_time if startup_time is not None else self.DEFAULT_STARTUP_TIME
 
         # Base velocity function
         if callable(velocity):
@@ -649,16 +663,33 @@ class RiemannGhostPistonBC(BoundaryCondition):
         self._interface_state = None
 
     def _create_ramped_velocity(self) -> VelocityProfile:
-        """Create velocity profile with linear ramp-up."""
+        """Create velocity profile with smooth erf ramp-up.
+
+        Uses error function for smooth S-curve acceleration profile:
+        v(t) = v_target * (1 + erf(6*(t-t_mid)/t_ramp)) / 2
+
+        where t_mid = t_start + t_ramp/2 is the midpoint (inflection point).
+
+        This maps [t_start, t_start+t_ramp] to [-3, +3] in erf space:
+        - At t=t_start: erf(-3) ≈ -0.99998, v ≈ 0 (flat start, zero acceleration)
+        - At t=t_mid: erf(0) = 0, v = v_target/2 (inflection point, max acceleration)
+        - At t=t_start+t_ramp: erf(3) ≈ 0.99998, v ≈ v_target (flat end, zero acceleration)
+        """
+        from scipy.special import erf
         t_ramp = self._ramp_time
+        t_start = self._startup_time
         base_func = self._base_velocity_func
 
         def ramped_velocity(t: float) -> float:
             v_target = base_func(t)
-            if t < t_ramp:
-                return v_target * (t / t_ramp)
-            else:
+            if t <= t_start:
+                return 0.0
+            if t >= t_start + t_ramp:
                 return v_target
+            # Map [t_start, t_start+t_ramp] to [-3, +3] for smooth S-curve
+            t_rel = t - t_start
+            x = 6.0 * (t_rel / t_ramp) - 3.0
+            return v_target * (1.0 + erf(x)) / 2.0
 
         return ramped_velocity
 
@@ -666,6 +697,11 @@ class RiemannGhostPistonBC(BoundaryCondition):
     def ramp_time(self) -> float:
         """Velocity ramp-up time [s]."""
         return self._ramp_time
+
+    @property
+    def startup_time(self) -> float:
+        """Startup delay before ramp begins [s]."""
+        return self._startup_time
 
     @property
     def thermal_bc(self) -> ThermalBCType:
@@ -818,6 +854,236 @@ class RiemannGhostPistonBC(BoundaryCondition):
         v_piston = self._velocity_func(t)
 
         # Compute interface state if not already done
+        if self._interface_state is None:
+            self.compute_interface_state(state, grid, t)
+
+        p_star = self._interface_state.p
+
+        return BoundaryFlux(
+            p_flux=p_star,
+            pu_flux=p_star * v_piston,
+            u_flux=v_piston,
+        )
+
+
+class MovingDataDrivenPistonBC(BoundaryCondition):
+    """
+    Moving piston BC using velocity from trajectory data.
+
+    Uses a trajectory interpolator to get position/velocity from data files.
+    This is a solid piston BC - gas velocity equals piston velocity.
+
+    Features:
+        - Linear interpolation between data points (via trajectory object)
+        - Riemann-based ghost cell for interface state
+        - velocity_scale: scales the trajectory velocity
+        - velocity_min: minimum allowed velocity (clamping)
+        - time_offset: for synchronization with data
+
+    Reference: [Toro2009] Section 6.3
+    """
+
+    def __init__(
+        self,
+        side: BoundarySide,
+        eos: EOSBase,
+        trajectory: TrajectoryInterpolator,
+        velocity_scale: float = 1.0,
+        velocity_min: Optional[float] = None,
+        time_offset: float = 0.0,
+        tol: float = 1e-8,
+        thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
+        piston_temperature: Optional[float] = None,
+    ):
+        """
+        Initialize data-driven piston boundary condition.
+
+        Parameters
+        ----------
+        side : BoundarySide
+            Which side of the domain (LEFT or RIGHT)
+        eos : EOSBase
+            Equation of state
+        trajectory : TrajectoryInterpolator
+            Interpolator for trajectory data. Must have position(t) and
+            velocity(t) methods. Compatible with PeleTrajectoryInterpolator
+            and SyntheticTrajectoryInterpolator.
+        velocity_scale : float
+            Scale factor for velocity (default 1.0)
+        velocity_min : float, optional
+            Minimum allowed velocity [m/s] (default None = no clamping)
+        time_offset : float
+            Time offset [s] (simulation_time = data_time + time_offset)
+        tol : float
+            Tolerance for Riemann solver iteration
+        thermal_bc : ThermalBCType
+            Type of thermal boundary condition
+        piston_temperature : float, optional
+            Piston temperature [K] (for isothermal BC)
+        """
+        super().__init__(side, eos)
+
+        self._trajectory = trajectory
+        self._velocity_scale = velocity_scale
+        self._velocity_min = velocity_min
+        self._time_offset = time_offset
+        self._tol = tol
+        self._thermal_bc = thermal_bc
+        self._piston_temperature = piston_temperature
+
+        # Import Riemann solver
+        from lagrangian_solver.numerics.boundary_riemann import BoundaryRiemannSolver
+        self._boundary_solver = BoundaryRiemannSolver(eos, tol=tol)
+
+        # Cache interface state for momentum equation
+        self._interface_state = None
+
+    @property
+    def trajectory(self) -> TrajectoryInterpolator:
+        """Trajectory interpolator."""
+        return self._trajectory
+
+    @property
+    def thermal_bc(self) -> ThermalBCType:
+        """Type of thermal boundary condition."""
+        return self._thermal_bc
+
+    def _get_data_time(self, t: float) -> float:
+        """Convert simulation time to data time."""
+        return t - self._time_offset
+
+    def get_piston_position(self, t: float) -> float:
+        """
+        Get piston position at time t.
+
+        Returns position from trajectory data.
+        """
+        t_data = self._get_data_time(t)
+        return self._trajectory.position(t_data)
+
+    def get_piston_velocity(self, t: float) -> float:
+        """
+        Get piston velocity at time t.
+
+        Returns scaled velocity from trajectory data, with optional
+        minimum velocity clamping.
+        """
+        t_data = self._get_data_time(t)
+        v = self._trajectory.velocity(t_data)
+        v_scaled = v * self._velocity_scale
+
+        # Apply minimum velocity clamp if specified
+        if self._velocity_min is not None:
+            v_scaled = max(self._velocity_min, v_scaled)
+
+        return v_scaled
+
+    def get_boundary_velocity(self, t: float) -> float:
+        """Get boundary face velocity at time t."""
+        return self.get_piston_velocity(t)
+
+    def compute_interface_state(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ):
+        """
+        Compute interface state by solving boundary Riemann problem.
+
+        Uses piston velocity to solve the Riemann problem.
+        """
+        from lagrangian_solver.numerics.boundary_riemann import BoundaryState
+
+        v_piston = self.get_piston_velocity(t)
+        idx = self.cell_index
+
+        # Interior state from adjacent cell
+        rho_int = state.rho[idx]
+        p_int = state.p[idx]
+
+        # Use first interior face velocity (not boundary face)
+        if self._side == BoundarySide.LEFT:
+            u_int = state.u[1]
+            self._interface_state = self._boundary_solver.solve_left_boundary(
+                rho_int, u_int, p_int, v_piston
+            )
+        else:
+            u_int = state.u[-2]
+            self._interface_state = self._boundary_solver.solve_right_boundary(
+                rho_int, u_int, p_int, v_piston
+            )
+
+        return self._interface_state
+
+    def apply_velocity(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> None:
+        """
+        Set face velocity to piston velocity.
+
+        For solid piston, gas velocity = piston velocity.
+        """
+        v_piston = self.get_piston_velocity(t)
+        state.u[self.face_index] = v_piston
+
+    def apply_momentum(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        d_u: np.ndarray,
+        sigma: np.ndarray,
+        t: float,
+    ) -> None:
+        """
+        Apply momentum BC at piston face.
+
+        Computes d_u = dv_piston/dt using finite difference.
+        """
+        dt_check = 1e-8
+        v_now = self.get_piston_velocity(t)
+        v_later = self.get_piston_velocity(t + dt_check)
+        dv_dt = (v_later - v_now) / dt_check
+
+        d_u[self.face_index] = dv_dt
+
+    def get_interface_stress(self) -> float:
+        """
+        Get interface stress for momentum equation.
+
+        Returns Riemann solution pressure p*.
+        """
+        if self._interface_state is None:
+            raise RuntimeError(
+                "Interface state not computed. Call compute_interface_state first."
+            )
+        return self._interface_state.sigma
+
+    def has_ghost_cell(self) -> bool:
+        """Indicate this BC provides ghost cell stress."""
+        return True
+
+    @property
+    def interface_state(self):
+        """Access computed interface state (for diagnostics)."""
+        return self._interface_state
+
+    def compute_flux(
+        self,
+        state: FlowState,
+        grid: LagrangianGrid,
+        t: float,
+    ) -> BoundaryFlux:
+        """
+        Compute numerical flux at moving piston.
+
+        Legacy interface for backward compatibility.
+        """
+        v_piston = self.get_piston_velocity(t)
+
         if self._interface_state is None:
             self.compute_interface_state(state, grid, t)
 

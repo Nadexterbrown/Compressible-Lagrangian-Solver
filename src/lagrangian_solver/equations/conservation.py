@@ -224,10 +224,17 @@ class CompatibleConservation:
         bc_right.apply_momentum(state, grid, d_u, sigma, t)
 
         # 5. COMPATIBLE internal energy rate: de/dt = -σ * dτ/dt
-        # NOTE: Energy equation uses CELL stress, not interface stress.
-        # The ghost cell affects momentum (d_u), which affects d_tau,
-        # and energy follows via d_e = -sigma * d_tau.
-        # This maintains compatible energy discretization.
+        #
+        # The compatible formulation d_e = -sigma * d_tau is used for all cells.
+        # For boundary cells with ghost cell BC (RiemannGhostPistonBC), the
+        # ghost cell stress affects momentum (via sigma_interface in d_u above),
+        # which then affects d_tau, and energy follows via this compatible form.
+        #
+        # NOTE: Direct energy flux corrections at boundaries were found to cause
+        # overshoot. The compatible formulation works correctly without them
+        # when the momentum equation properly handles the boundary stress.
+        #
+        # Reference: Caramana et al. (1998), Burton (1992)
         d_e = -sigma * d_tau
 
         # 6. Add artificial heat conduction contribution if enabled
@@ -238,6 +245,7 @@ class CompatibleConservation:
             d_e = d_e + d_e_heat
 
         # 7. Position rate: dx/dt = u
+        # Grid moves with face velocity (pure Lagrangian)
         d_x = u.copy()
 
         return d_tau, d_u, d_e, d_x

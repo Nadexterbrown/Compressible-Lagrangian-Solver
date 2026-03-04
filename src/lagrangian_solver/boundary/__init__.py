@@ -2,7 +2,12 @@
 
 from lagrangian_solver.boundary.base import BoundaryCondition, ThermalBCType, BoundarySide
 from lagrangian_solver.boundary.wall import SolidWallBC
-from lagrangian_solver.boundary.piston import MovingPistonBC, RiemannGhostPistonBC
+from lagrangian_solver.boundary.piston import (
+    MovingPistonBC,
+    RiemannGhostPistonBC,
+    MovingDataDrivenPistonBC,
+    TrajectoryInterpolator,
+)
 from lagrangian_solver.boundary.open import OpenBC
 
 __all__ = [
@@ -12,5 +17,7 @@ __all__ = [
     "SolidWallBC",
     "MovingPistonBC",
     "RiemannGhostPistonBC",
+    "MovingDataDrivenPistonBC",
+    "TrajectoryInterpolator",
     "OpenBC",
 ]
