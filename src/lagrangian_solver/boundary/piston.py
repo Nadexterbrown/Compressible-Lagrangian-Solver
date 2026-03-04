@@ -882,7 +882,7 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
         - time_offset: for synchronization with data
 
     Velocity transformation order:
-        v_final = max(velocity_min, v_data * velocity_scale - velocity_offset)
+        v_final = max(velocity_min, v_data * velocity_scale + velocity_offset)
 
     Reference: [Toro2009] Section 6.3
     """
@@ -916,7 +916,7 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
         velocity_scale : float
             Scale factor for velocity (default 1.0)
         velocity_offset : float
-            Value to subtract from scaled velocity [m/s] (default 0.0)
+            Value to add to scaled velocity [m/s] (default 0.0, use negative to subtract)
         velocity_min : float, optional
             Minimum allowed velocity [m/s] (default None = no clamping)
         time_offset : float
@@ -974,13 +974,13 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
         Get piston velocity at time t.
 
         Applies transformations in order:
-            v_final = max(velocity_min, v_data * velocity_scale - velocity_offset)
+            v_final = max(velocity_min, v_data * velocity_scale + velocity_offset)
         """
         t_data = self._get_data_time(t)
         v = self._trajectory.velocity(t_data)
 
         # Apply scale then offset
-        v_modified = v * self._velocity_scale - self._velocity_offset
+        v_modified = v * self._velocity_scale + self._velocity_offset
 
         # Apply minimum velocity clamp if specified
         if self._velocity_min is not None:

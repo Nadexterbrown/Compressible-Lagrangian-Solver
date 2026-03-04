@@ -494,7 +494,7 @@ def run_reconstruction(
     velocity_scale : float
         Scale factor for piston velocity (default 1.0)
     velocity_offset : float
-        Value to subtract from scaled velocity [m/s] (default 0.0)
+        Value to add to scaled velocity [m/s] (default 0.0, use negative to subtract)
     velocity_min : float, optional
         Minimum allowed piston velocity [m/s] (default None = no clamping)
     output_dir : str, optional
@@ -572,7 +572,7 @@ def run_reconstruction(
     if velocity_scale != 1.0:
         print(f"  Velocity scale: {velocity_scale}")
     if velocity_offset != 0.0:
-        print(f"  Velocity offset: -{velocity_offset} m/s")
+        print(f"  Velocity offset: {velocity_offset:+.1f} m/s")
     if velocity_min is not None:
         print(f"  Velocity min: {velocity_min} m/s")
 
@@ -723,7 +723,7 @@ def main():
     parser.add_argument("--velocity-scale", type=float, default=1.0,
                         help="Scale factor for piston velocity (default 1.0)")
     parser.add_argument("--velocity-offset", type=float, default=0.0,
-                        help="Value to subtract from scaled velocity [m/s] (default 0.0)")
+                        help="Value to add to scaled velocity [m/s] (default 0.0, use negative to subtract)")
     parser.add_argument("--velocity-min", type=float, default=None,
                         help="Minimum allowed piston velocity [m/s] (default: None, no clamping)")
     parser.add_argument("--output-dir", type=str, default=None,
