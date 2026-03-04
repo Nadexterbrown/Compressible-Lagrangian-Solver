@@ -877,8 +877,12 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
         - Linear interpolation between data points (via trajectory object)
         - Riemann-based ghost cell for interface state
         - velocity_scale: scales the trajectory velocity
+        - velocity_offset: subtracts from the scaled velocity
         - velocity_min: minimum allowed velocity (clamping)
         - time_offset: for synchronization with data
+
+    Velocity transformation order:
+        v_final = max(velocity_min, v_data * velocity_scale - velocity_offset)
 
     Reference: [Toro2009] Section 6.3
     """
@@ -889,6 +893,7 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
         eos: EOSBase,
         trajectory: TrajectoryInterpolator,
         velocity_scale: float = 1.0,
+        velocity_offset: float = 0.0,
         velocity_min: Optional[float] = None,
         time_offset: float = 0.0,
         tol: float = 1e-8,
@@ -910,6 +915,8 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
             and SyntheticTrajectoryInterpolator.
         velocity_scale : float
             Scale factor for velocity (default 1.0)
+        velocity_offset : float
+            Value to subtract from scaled velocity [m/s] (default 0.0)
         velocity_min : float, optional
             Minimum allowed velocity [m/s] (default None = no clamping)
         time_offset : float
@@ -925,6 +932,7 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
 
         self._trajectory = trajectory
         self._velocity_scale = velocity_scale
+        self._velocity_offset = velocity_offset
         self._velocity_min = velocity_min
         self._time_offset = time_offset
         self._tol = tol
@@ -965,18 +973,20 @@ class MovingDataDrivenPistonBC(BoundaryCondition):
         """
         Get piston velocity at time t.
 
-        Returns scaled velocity from trajectory data, with optional
-        minimum velocity clamping.
+        Applies transformations in order:
+            v_final = max(velocity_min, v_data * velocity_scale - velocity_offset)
         """
         t_data = self._get_data_time(t)
         v = self._trajectory.velocity(t_data)
-        v_scaled = v * self._velocity_scale
+
+        # Apply scale then offset
+        v_modified = v * self._velocity_scale - self._velocity_offset
 
         # Apply minimum velocity clamp if specified
         if self._velocity_min is not None:
-            v_scaled = max(self._velocity_min, v_scaled)
+            v_modified = max(self._velocity_min, v_modified)
 
-        return v_scaled
+        return v_modified
 
     def get_boundary_velocity(self, t: float) -> float:
         """Get boundary face velocity at time t."""
