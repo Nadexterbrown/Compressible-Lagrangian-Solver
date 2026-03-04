@@ -327,6 +327,7 @@ def plot_bounds_comparison(
     output_file: str,
     piston_histories: Optional[List[Dict]] = None,
     dataset_labels: Optional[List[str]] = None,
+    align_piston_positions: bool = False,
 ):
     """
     Create bounds comparison plot with multiple simulation datasets.
@@ -348,6 +349,9 @@ def plot_bounds_comparison(
         Piston velocity history for each dataset
     dataset_labels : list of str, optional
         Labels for legend (e.g., ['S_f', 'S_f - CJ_def'])
+    align_piston_positions : bool
+        If True, shift datasets so all piston positions align with the
+        maximum piston position (rightmost) for visual comparison.
     """
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
@@ -358,17 +362,38 @@ def plot_bounds_comparison(
     if dataset_labels is None:
         dataset_labels = [d.get('label', f'Dataset {i+1}') for i, d in enumerate(matched_data)]
 
+    # Compute position shifts for each dataset if aligning piston positions
+    # Each dataset gets its own shift array (one shift per time snapshot)
+    position_shifts = []
+    if align_piston_positions and n_datasets >= 2:
+        # For each time snapshot, find the max piston position across datasets
+        for i in range(n_times):
+            piston_positions = [data['snapshots'][i].x_centers.min() for data in matched_data]
+            max_piston = max(piston_positions)
+            shifts = [max_piston - pos for pos in piston_positions]
+            position_shifts.append(shifts)
+        print(f"  Position alignment enabled:")
+        for j, data in enumerate(matched_data):
+            avg_shift = np.mean([position_shifts[i][j] for i in range(n_times)])
+            print(f"    Dataset '{dataset_labels[j]}': avg shift = {avg_shift*100:.2f} cm")
+    else:
+        # No shift
+        for i in range(n_times):
+            position_shifts.append([0.0] * n_datasets)
+
     # Create figure: 3 rows x 2 columns
     fig, axes = plt.subplots(3, 2, figsize=(14, 10),
                               gridspec_kw={'width_ratios': [2, 1], 'wspace': 0.25, 'hspace': 0.25})
 
-    # Get global x-range from all datasets
+    # Get global x-range from all datasets (with shifts applied)
     x_min_global = float('inf')
     x_max_global = float('-inf')
-    for data in matched_data:
-        for snap in data['snapshots']:
-            x_min_global = min(x_min_global, snap.x_centers.min())
-            x_max_global = max(x_max_global, snap.x_centers.max())
+    for i, pele in enumerate(pele_snapshots):
+        for j, data in enumerate(matched_data):
+            snap = data['snapshots'][i]
+            shift = position_shifts[i][j]
+            x_min_global = min(x_min_global, snap.x_centers.min() + shift)
+            x_max_global = max(x_max_global, snap.x_centers.max() + shift)
 
     x_lim = (0, x_max_global * 100 + 50)  # Extra space for legend
 
@@ -395,19 +420,22 @@ def plot_bounds_comparison(
 
             # Get simulation data from all datasets at this time
             sim_data_list = [data['snapshots'][i] for data in matched_data]
+            shifts = position_shifts[i]
 
-            # Get common x range for this time
-            x_min_time = max(s.x_centers.min() for s in sim_data_list)
-            x_max_time = min(s.x_centers.max() for s in sim_data_list)
+            # Get common x range for this time (with shifts applied)
+            x_min_time = max(s.x_centers.min() + shifts[j] for j, s in enumerate(sim_data_list))
+            x_max_time = min(s.x_centers.max() + shifts[j] for j, s in enumerate(sim_data_list))
 
             # Interpolate all datasets to common grid
             n_points = 500
             x_common = np.linspace(x_min_time, x_max_time, n_points)
 
             y_all = []
-            for sim in sim_data_list:
+            for j, sim in enumerate(sim_data_list):
+                shift = shifts[j]
                 y_data = getattr(sim, attr) * scale
-                interp_func = interp1d(sim.x_centers, y_data, kind='linear',
+                # Interpolate using shifted x coordinates
+                interp_func = interp1d(sim.x_centers + shift, y_data, kind='linear',
                                        bounds_error=False, fill_value='extrapolate')
                 y_all.append(interp_func(x_common))
 
@@ -424,8 +452,8 @@ def plot_bounds_comparison(
             ax.plot(x_cm, y_min, color=color, lw=LINE_WIDTH, linestyle='-', zorder=3)
             ax.plot(x_cm, y_max, color=color, lw=LINE_WIDTH, linestyle='-', zorder=3)
 
-            # Plot vertical dashed line at piston position (use first dataset)
-            piston_x = sim_data_list[0].x_centers.min() * 100
+            # Plot vertical dashed line at piston position (use first dataset with shift)
+            piston_x = (sim_data_list[0].x_centers.min() + shifts[0]) * 100
             ax.axvline(piston_x, color=color, lw=1, linestyle='--', alpha=0.7, zorder=1)
 
             # Plot PeleC (dashed line)
@@ -540,6 +568,7 @@ def compare_with_pele_bounds(
     output_dir: Path,
     extract_location: float = 0.0445,
     dataset_labels: Optional[List[str]] = None,
+    align_piston_positions: bool = False,
 ):
     """
     Compare multiple simulation datasets with PeleC as bounds.
@@ -556,6 +585,8 @@ def compare_with_pele_bounds(
         Y-coordinate for PeleC ray extraction [m]
     dataset_labels : list of str, optional
         Labels for datasets (e.g., ['S_f', 'S_f - CJ_def'])
+    align_piston_positions : bool
+        If True, shift datasets so piston positions align (for visual comparison)
     """
     print("=" * 70)
     print("PELE BOUNDS COMPARISON")
@@ -634,6 +665,7 @@ def compare_with_pele_bounds(
         str(output_file),
         piston_histories=piston_histories if piston_histories else None,
         dataset_labels=dataset_labels,
+        align_piston_positions=align_piston_positions,
     )
 
     print("\n" + "=" * 70)
@@ -754,6 +786,8 @@ def main():
                         help="Y-coordinate for PeleC ray extraction [m]")
     parser.add_argument("--labels", type=str, nargs='+', default=None,
                         help="Labels for datasets (e.g., 'S_f' 'S_f-CJ_def')")
+    parser.add_argument("--align-piston", action="store_true",
+                        help="Shift datasets so piston positions align (for visual comparison)")
 
     args = parser.parse_args()
 
@@ -775,6 +809,7 @@ def main():
             output_dir=Path(args.output_dir),
             extract_location=args.extract_location,
             dataset_labels=args.labels,
+            align_piston_positions=args.align_piston,
         )
 
 
