@@ -173,6 +173,19 @@ class CompatibleConservation:
         # 1. Specific volume rate: dτ/dt = (u_{i+1} - u_i) / dm_i
         d_tau = (u[1:] - u[:-1]) / dm
 
+        # For porous BCs, the specific volume evolution must account for
+        # both grid motion (at piston velocity) and mass flux (based on
+        # gas velocity). The correct formula is:
+        #   d_tau = (u_interior - u_gas) / dm
+        # This ensures tau evolution is consistent with geometry + mass update.
+        if hasattr(bc_left, 'get_gas_velocity'):
+            u_gas_left = bc_left.get_gas_velocity(t)
+            d_tau[0] = (u[1] - u_gas_left) / dm[0]
+
+        if hasattr(bc_right, 'get_gas_velocity'):
+            u_gas_right = bc_right.get_gas_velocity(t)
+            d_tau[-1] = (u_gas_right - u[-2]) / dm[-1]
+
         # 2. Cell-centered stress σ = p + Q
         sigma = self.compute_stress(state, grid)
 

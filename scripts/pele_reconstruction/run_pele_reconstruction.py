@@ -35,7 +35,7 @@ from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
 from lagrangian_solver.equations.eos import CanteraEOS
 from lagrangian_solver.boundary.base import BoundarySide, ThermalBCType
 from lagrangian_solver.boundary.open import OpenBC
-from lagrangian_solver.boundary import MovingDataDrivenPistonBC
+from lagrangian_solver.boundary import MovingDataDrivenPistonBC, PorousGhostPistonBC, MovingPorousPistonBC
 
 from pele_data_loader import PeleDataLoader, PeleTrajectoryInterpolator
 from synthetic_data_loader import SyntheticDataLoader, SyntheticTrajectoryInterpolator
@@ -427,21 +427,28 @@ def save_snapshots(saved_data: Dict, config: Dict, output_dir: str, snapshot_int
     print(f"  Saved snapshots: {saved_count} files in {snapshots_path}")
 
 
-def plot_velocity_comparison(saved_data: Dict, traj_data, output_file: str):
+def plot_velocity_comparison(saved_data: Dict, traj_data, output_file: str, use_porous: bool = False):
     """Plot velocity comparison between 1D solver and trajectory data."""
     fig, ax = plt.subplots(figsize=(10, 6))
 
     times_us = saved_data['t'] * 1e6
 
     # Plot piston velocity (grid motion) - should match flame velocity
-    ax.plot(times_us, saved_data['u_piston'], 'b-', lw=2, label='Piston velocity (1D solver)')
+    ax.plot(times_us, saved_data['u_piston'], 'b-', lw=2, label='Piston velocity (boundary motion)')
+
+    # Plot gas velocity if porous BC (different from piston)
+    if use_porous and 'u_gas' in saved_data:
+        ax.plot(times_us, saved_data['u_gas'], 'g-', lw=2, label='Gas velocity (BC condition)')
 
     # Plot trajectory flame velocity
     ax.plot(traj_data.time * 1e6, traj_data.flame_velocity, 'r--', lw=1.5, alpha=0.7, label='Trajectory flame velocity')
 
     ax.set_xlabel('Time [µs]')
     ax.set_ylabel('Velocity [m/s]')
-    ax.set_title('Velocity Comparison')
+    if use_porous:
+        ax.set_title('Velocity Comparison (Porous BC)')
+    else:
+        ax.set_title('Velocity Comparison (Solid BC)')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -466,6 +473,9 @@ def run_reconstruction(
     velocity_scale: float = 1.0,
     velocity_offset: float = 0.0,
     velocity_min: float = None,
+    gas_velocity_offset: float = None,
+    gas_velocity_min: float = None,
+    n_records: int = 1000,
     output_dir: str = None,
 ):
     """
@@ -497,6 +507,16 @@ def run_reconstruction(
         Value to add to scaled velocity [m/s] (default 0.0, use negative to subtract)
     velocity_min : float, optional
         Minimum allowed piston velocity [m/s] (default None = no clamping)
+    gas_velocity_offset : float, optional
+        If specified, use PorousGhostPistonBC with gas velocity = piston velocity + offset.
+        For example, -119 means gas velocity is 119 m/s slower than piston velocity.
+        Default None uses solid piston BC (MovingDataDrivenPistonBC).
+    gas_velocity_min : float, optional
+        Minimum allowed gas velocity [m/s] when using porous BC.
+        Gas velocity is clamped to this value. Default None = no clamping.
+        Use 0 to prevent negative gas velocities.
+    n_records : int
+        Number of timesteps to record in output (default 1000).
     output_dir : str, optional
         Output directory
     """
@@ -545,7 +565,8 @@ def run_reconstruction(
 
     # Setup output directory
     if output_dir is None:
-        output_dir = Path(__file__).parent / "results" / "solid"
+        bc_subdir = "porous" if gas_velocity_offset is not None else "solid"
+        output_dir = Path(__file__).parent / "results" / bc_subdir
     else:
         output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -564,6 +585,9 @@ def run_reconstruction(
     # Create initial state
     state, rho_init, c_init = create_initial_state(grid, eos, INPUT_PARAMS_CONFIG['T'], INPUT_PARAMS_CONFIG['P'])
 
+    # Determine if using porous BC
+    use_porous = gas_velocity_offset is not None
+
     print(f"\nSimulation setup:")
     print(f"  Domain: {domain_length} m, {n_cells} cells")
     print(f"  t_end: {t_end*1e3:.3f} ms")
@@ -575,15 +599,47 @@ def run_reconstruction(
         print(f"  Velocity offset: {velocity_offset:+.1f} m/s")
     if velocity_min is not None:
         print(f"  Velocity min: {velocity_min} m/s")
+    if use_porous:
+        print(f"  BC Type: POROUS (gas_velocity_offset = {gas_velocity_offset:+.1f} m/s)")
+        if gas_velocity_min is not None:
+            print(f"  Gas velocity min: {gas_velocity_min} m/s")
+    else:
+        print(f"  BC Type: SOLID")
 
     # Create boundary conditions
-    left_bc = MovingDataDrivenPistonBC(
-        side=BoundarySide.LEFT, eos=eos, trajectory=trajectory,
-        velocity_scale=velocity_scale,
-        velocity_offset=velocity_offset,
-        velocity_min=velocity_min,
-        thermal_bc=ThermalBCType.ADIABATIC,
-    )
+    if use_porous:
+        # Porous piston BC using MovingPorousPistonBC with trajectory
+        # Gas velocity = piston velocity + gas_velocity_offset
+
+        # Warn about large velocity differences
+        max_diff = abs(gas_velocity_offset) if gas_velocity_offset else 0
+        if max_diff > 0.1 * c_init:  # More than 10% of sound speed
+            print(f"\n  WARNING: Large velocity difference ({max_diff:.1f} m/s).")
+            print(f"           This may cause numerical instability (cell collapse).")
+            print(f"           The porous BC can only handle moderate velocity differences")
+            print(f"           before the boundary cell drains completely.")
+            print(f"           Consider one of:")
+            print(f"           1. Use a smaller offset (e.g., --gas-velocity-offset -50)")
+            print(f"           2. Allow negative gas velocities (don't set --gas-velocity-min)")
+            print(f"           3. Increase resolution (--cells 1000)")
+            print()
+
+        left_bc = MovingPorousPistonBC(
+            side=BoundarySide.LEFT, eos=eos,
+            trajectory=trajectory,
+            gas_velocity_offset=gas_velocity_offset,
+            gas_velocity_min=gas_velocity_min,
+            thermal_bc=ThermalBCType.ADIABATIC,
+        )
+    else:
+        # Solid piston BC
+        left_bc = MovingDataDrivenPistonBC(
+            side=BoundarySide.LEFT, eos=eos, trajectory=trajectory,
+            velocity_scale=velocity_scale,
+            velocity_offset=velocity_offset,
+            velocity_min=velocity_min,
+            thermal_bc=ThermalBCType.ADIABATIC,
+        )
     right_bc = OpenBC(side=BoundarySide.RIGHT, eos=eos, p_external=INPUT_PARAMS_CONFIG['P'])
 
     # Create solver
@@ -595,16 +651,18 @@ def run_reconstruction(
     saved_data = {
         't': [], 'x': [], 'rho': [], 'u': [], 'p': [], 'e': [], 'T': [], 's': [],
         'u_piston': [],  # Piston velocity (grid motion)
+        'u_gas': [],     # Gas velocity at boundary (same as piston for solid BC)
     }
 
     # Recording interval
     dx_min = np.min(grid.dx)
     dt_approx = cfl * dx_min / c_init
     estimated_steps = int(t_end / dt_approx)
-    record_interval = max(1, estimated_steps // 1000)
+    record_interval = max(1, estimated_steps // n_records)
 
-    print(f"\nRunning: solid piston reconstruction")
-    print(f"  Record every {record_interval} steps")
+    bc_type = "porous" if use_porous else "solid"
+    print(f"\nRunning: {bc_type} piston reconstruction")
+    print(f"  Target records: {n_records}, record every {record_interval} steps")
 
     step = 0
     t = 0.0
@@ -629,7 +687,12 @@ def run_reconstruction(
             saved_data['e'].append(current_state.e.copy())
             saved_data['T'].append(current_state.T.copy())
             saved_data['s'].append(current_state.s.copy())
-            saved_data['u_piston'].append(left_bc.get_piston_velocity(t))
+            if use_porous:
+                saved_data['u_piston'].append(left_bc.get_piston_velocity(t))
+                saved_data['u_gas'].append(left_bc.get_gas_velocity(t))
+            else:
+                saved_data['u_piston'].append(left_bc.get_piston_velocity(t))
+                saved_data['u_gas'].append(left_bc.get_piston_velocity(t))  # Same for solid
 
         try:
             solver.step_forward(dt)
@@ -653,7 +716,8 @@ def run_reconstruction(
 
     # Config dictionary
     config = {
-        "case_name": "pele_reconstruction_solid",
+        "case_name": f"pele_reconstruction_{bc_type}",
+        "bc_type": bc_type,
         "domain_length": domain_length,
         "n_cells": n_cells,
         "t_end": t_end,
@@ -663,6 +727,8 @@ def run_reconstruction(
         "velocity_scale": velocity_scale,
         "velocity_offset": velocity_offset,
         "velocity_min": velocity_min,
+        "gas_velocity_offset": gas_velocity_offset,
+        "gas_velocity_min": gas_velocity_min,
         "data_source": str(data_dir),
         "n_data_points": len(data.time),
         "data_time_range": [float(data.time[0]), float(data.time[-1])],
@@ -672,6 +738,12 @@ def run_reconstruction(
         "T_init": INPUT_PARAMS_CONFIG['T'],
         "p_init": INPUT_PARAMS_CONFIG['P'],
     }
+
+    # Add porous-specific diagnostics
+    if use_porous and hasattr(left_bc, 'mass_leaked'):
+        config["mass_leaked"] = left_bc.mass_leaked
+        print(f"\nPorous BC diagnostics:")
+        print(f"  Total mass leaked: {left_bc.mass_leaked:.6e} kg")
 
     # Save outputs
     print(f"\nSaving results to: {output_dir}")
@@ -702,7 +774,7 @@ def run_reconstruction(
     save_snapshots(saved_data, config, str(output_dir), snapshot_interval=1)
 
     # Velocity comparison plot
-    plot_velocity_comparison(saved_data, data, str(output_dir / "velocity_comparison.png"))
+    plot_velocity_comparison(saved_data, data, str(output_dir / "velocity_comparison.png"), use_porous=use_porous)
     print(f"  Saved: velocity_comparison.png")
 
     print(f"\nDone! Results saved to: {output_dir}")
@@ -726,8 +798,17 @@ def main():
                         help="Value to add to scaled velocity [m/s] (default 0.0, use negative to subtract)")
     parser.add_argument("--velocity-min", type=float, default=None,
                         help="Minimum allowed piston velocity [m/s] (default: None, no clamping)")
+    parser.add_argument("--gas-velocity-offset", type=float, default=None,
+                        help="Gas velocity offset for porous BC [m/s]. If specified, uses PorousGhostPistonBC "
+                             "with gas_velocity = piston_velocity + offset. Use negative for slower gas. "
+                             "(default: None, uses solid piston BC)")
+    parser.add_argument("--gas-velocity-min", type=float, default=None,
+                        help="Minimum allowed gas velocity [m/s] for porous BC. Use 0 to prevent negative "
+                             "gas velocities. (default: None, no clamping)")
+    parser.add_argument("--n-records", type=int, default=1000,
+                        help="Number of timesteps to record (default: 1000)")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory (default: results/solid)")
+                        help="Output directory (default: results/solid or results/porous)")
 
     args = parser.parse_args()
 
@@ -741,6 +822,9 @@ def main():
         velocity_scale=args.velocity_scale,
         velocity_offset=args.velocity_offset,
         velocity_min=args.velocity_min,
+        gas_velocity_offset=args.gas_velocity_offset,
+        gas_velocity_min=args.gas_velocity_min,
+        n_records=args.n_records,
         output_dir=args.output_dir,
     )
 

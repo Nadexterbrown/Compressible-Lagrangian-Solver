@@ -209,7 +209,7 @@ class LagrangianGrid:
 
         self._mass_initialized = True
 
-    def set_positions(self, x: np.ndarray):
+    def set_positions(self, x: np.ndarray, enforce_minimum: bool = True):
         """
         Set face positions directly.
 
@@ -217,6 +217,8 @@ class LagrangianGrid:
 
         Args:
             x: New face positions [m]
+            enforce_minimum: If True, enforce minimum cell width at boundary
+                            only (for porous BC stability)
 
         Raises:
             ValueError: If positions are not monotonically increasing
@@ -226,11 +228,33 @@ class LagrangianGrid:
                 f"x must have length n_faces={self._n_faces}, got {len(x)}"
             )
 
-        # Check monotonicity
-        if np.any(np.diff(x) <= 0):
-            raise ValueError("Face positions must be strictly increasing")
+        x_safe = x.copy()
 
-        self._x[:] = x
+        if enforce_minimum:
+            # Only fix the boundary cell if it's about to collapse
+            # This allows the simulation to continue while protecting
+            # against complete cell collapse
+            min_dx = 1e-10  # Very small but non-zero
+
+            # Check first cell (left boundary)
+            if x_safe[1] - x_safe[0] < min_dx:
+                x_safe[1] = x_safe[0] + min_dx
+
+            # Check last cell (right boundary)
+            if x_safe[-1] - x_safe[-2] < min_dx:
+                x_safe[-2] = x_safe[-1] - min_dx
+
+        # Final check
+        if np.any(np.diff(x_safe) <= 0):
+            # Try to identify the problematic cell
+            diffs = np.diff(x_safe)
+            bad_idx = np.where(diffs <= 0)[0]
+            raise ValueError(
+                f"Face positions must be strictly increasing. "
+                f"Problem at cell(s): {bad_idx}, dx values: {diffs[bad_idx]}"
+            )
+
+        self._x[:] = x_safe
 
     def update_positions(self, u: np.ndarray, dt: float):
         """
@@ -341,6 +365,45 @@ class LagrangianGrid:
             "m": self._m.copy(),
             "dm": self._dm.copy(),
         }
+
+    def add_boundary_mass(self, side: "BoundarySide", dm: float) -> None:
+        """
+        Adjust boundary cell mass for porous BC.
+
+        In a porous piston BC, mass can flow through the boundary when
+        the gas velocity differs from the piston velocity. This method
+        updates the boundary cell mass while maintaining consistency
+        of the cumulative mass coordinate.
+
+        Args:
+            side: Which boundary (LEFT or RIGHT)
+            dm: Mass change (positive = cell gains mass)
+
+        Raises:
+            ValueError: If boundary cell mass becomes non-positive
+
+        Reference: Used by PorousGhostPistonBC for mass flux tracking
+        """
+        from lagrangian_solver.boundary.base import BoundarySide
+
+        if side == BoundarySide.LEFT:
+            self._dm[0] += dm
+            # Update cumulative mass for all faces after cell 0
+            self._m[1:] += dm
+        else:
+            self._dm[-1] += dm
+            # Cumulative mass at right boundary doesn't change
+            # (cumulative is measured from left)
+
+        # Validate positive mass
+        if side == BoundarySide.LEFT and self._dm[0] <= 0:
+            raise ValueError(
+                f"Left boundary cell mass became non-positive: {self._dm[0]}"
+            )
+        if side == BoundarySide.RIGHT and self._dm[-1] <= 0:
+            raise ValueError(
+                f"Right boundary cell mass became non-positive: {self._dm[-1]}"
+            )
 
     @classmethod
     def from_dict(cls, data: dict) -> "LagrangianGrid":

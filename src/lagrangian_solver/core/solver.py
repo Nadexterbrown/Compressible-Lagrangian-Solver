@@ -312,15 +312,29 @@ class CompatibleLagrangianSolver:
         Compute the right-hand side of the ODE system.
 
         Returns (d_tau, d_u, d_e, d_x) using compatible discretization.
+
+        For porous BCs, apply_position_rate is called to override d_x
+        at boundaries so grid position tracks piston velocity while
+        gas dynamics use gas velocity.
         """
         # Apply boundary velocities first
         self._bc_left.apply_velocity(state, grid, self._time)
         self._bc_right.apply_velocity(state, grid, self._time)
 
         # Compute residual using compatible discretization
-        return self._conservation.compute_residual(
+        d_tau, d_u, d_e, d_x = self._conservation.compute_residual(
             state, grid, self._bc_left, self._bc_right, self._time
         )
+
+        # For porous BCs, override d_x at boundaries to track piston position
+        # instead of following gas velocity
+        if hasattr(self._bc_left, 'apply_position_rate'):
+            self._bc_left.apply_position_rate(d_x, state, grid, self._time)
+
+        if hasattr(self._bc_right, 'apply_position_rate'):
+            self._bc_right.apply_position_rate(d_x, state, grid, self._time)
+
+        return d_tau, d_u, d_e, d_x
 
     def compute_total_energy(self) -> float:
         """
@@ -371,6 +385,17 @@ class CompatibleLagrangianSolver:
             dt = max(dt, self._config.dt_min)
             ts_info.dt = dt
 
+        # Apply porous BC CFL constraint (prevent draining boundary cell too fast)
+        if hasattr(self._bc_left, 'get_max_dt_constraint'):
+            dt_porous_left = self._bc_left.get_max_dt_constraint(self._grid)
+            dt = min(dt, dt_porous_left)
+            ts_info.dt = dt
+
+        if hasattr(self._bc_right, 'get_max_dt_constraint'):
+            dt_porous_right = self._bc_right.get_max_dt_constraint(self._grid)
+            dt = min(dt, dt_porous_right)
+            ts_info.dt = dt
+
         # Don't exceed final time
         if self._time + dt > self._config.t_end:
             dt = self._config.t_end - self._time
@@ -383,6 +408,12 @@ class CompatibleLagrangianSolver:
             dt,
             self._compute_rhs,
         )
+
+        # Update boundary cell mass for porous BCs
+        self._update_porous_boundary_mass(dt)
+
+        # Ensure state consistency with grid geometry for porous BCs
+        self._sync_porous_boundary_state()
 
         # Update time and step counter
         self._time += dt
@@ -397,6 +428,65 @@ class CompatibleLagrangianSolver:
             callback(self._state, self._time, self._step)
 
         return ts_info
+
+    def _update_porous_boundary_mass(self, dt: float) -> None:
+        """
+        Update boundary cell mass for porous boundary conditions.
+
+        For porous BCs where piston velocity differs from gas velocity,
+        mass flows through the boundary. This updates the cell mass
+        accordingly.
+
+        Also performs merge-split if boundary cell becomes too small/large.
+
+        Args:
+            dt: Time step size [s]
+        """
+        # Check left BC
+        if hasattr(self._bc_left, 'update_boundary_mass'):
+            self._bc_left.update_boundary_mass(self._grid, self._state, dt)
+            # Check if merge-split is needed
+            if hasattr(self._bc_left, 'check_merge_split'):
+                self._bc_left.check_merge_split(self._grid, self._state)
+
+        # Check right BC
+        if hasattr(self._bc_right, 'update_boundary_mass'):
+            self._bc_right.update_boundary_mass(self._grid, self._state, dt)
+            # Check if merge-split is needed
+            if hasattr(self._bc_right, 'check_merge_split'):
+                self._bc_right.check_merge_split(self._grid, self._state)
+
+    def _sync_porous_boundary_state(self) -> None:
+        """
+        Synchronize boundary cell state with grid geometry for porous BCs.
+
+        For porous BCs, the grid position evolves at piston velocity while
+        gas dynamics use gas velocity. This can cause the evolved tau to
+        diverge from the actual geometry (dx/dm). This method recomputes
+        tau and rho from the actual cell geometry to maintain consistency.
+        """
+        # Check left BC
+        if hasattr(self._bc_left, 'get_gas_velocity'):
+            idx = 0
+            dx = self._grid.x[1] - self._grid.x[0]
+            if dx <= 0:
+                raise ValueError(f"Left boundary cell width became non-positive: {dx}")
+            dm = self._grid.dm[idx]
+            # Recompute tau and rho from geometry
+            tau_geom = dx / dm
+            self._state.tau[idx] = tau_geom
+            self._state.rho[idx] = 1.0 / tau_geom
+
+        # Check right BC
+        if hasattr(self._bc_right, 'get_gas_velocity'):
+            idx = -1
+            dx = self._grid.x[-1] - self._grid.x[-2]
+            if dx <= 0:
+                raise ValueError(f"Right boundary cell width became non-positive: {dx}")
+            dm = self._grid.dm[idx]
+            tau_geom = dx / dm
+            self._state.tau[idx] = tau_geom
+            self._state.rho[idx] = 1.0 / tau_geom
 
     def run(self, writer=None) -> SolverStatistics:
         """

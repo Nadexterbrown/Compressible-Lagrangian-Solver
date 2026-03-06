@@ -6,6 +6,8 @@ from lagrangian_solver.boundary.piston import (
     MovingPistonBC,
     RiemannGhostPistonBC,
     MovingDataDrivenPistonBC,
+    PorousGhostPistonBC,
+    MovingPorousPistonBC,
     TrajectoryInterpolator,
 )
 from lagrangian_solver.boundary.open import OpenBC
@@ -18,6 +20,8 @@ __all__ = [
     "MovingPistonBC",
     "RiemannGhostPistonBC",
     "MovingDataDrivenPistonBC",
+    "PorousGhostPistonBC",
+    "MovingPorousPistonBC",
     "TrajectoryInterpolator",
     "OpenBC",
 ]
