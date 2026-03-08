@@ -264,58 +264,6 @@ class CompatibleConservation:
         return d_tau, d_u, d_e, d_x
 
 
-# Keep old LagrangianConservation for backward compatibility, but mark deprecated
-class LagrangianConservation:
-    """
-    DEPRECATED: Use CompatibleConservation for exact energy conservation.
-
-    This class uses Riemann fluxes which are inconsistent with cell-centered
-    pressure differences in the momentum equation, leading to energy errors.
-    """
-
-    def __init__(
-        self,
-        eos: EOSBase,
-        riemann_solver=None,
-        artificial_viscosity: "ArtificialViscosity" = None,
-    ):
-        """Initialize conservation law solver (DEPRECATED)."""
-        import warnings
-        warnings.warn(
-            "LagrangianConservation is deprecated. Use CompatibleConservation "
-            "for exact energy conservation.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self._eos = eos
-        self._riemann_solver = riemann_solver
-        self._artificial_viscosity = artificial_viscosity
-
-    @property
-    def eos(self) -> EOSBase:
-        return self._eos
-
-    @property
-    def riemann_solver(self):
-        return self._riemann_solver
-
-    @property
-    def artificial_viscosity(self):
-        return self._artificial_viscosity
-
-    def compute_fluxes(self, state: FlowState, grid: LagrangianGrid):
-        """Compute numerical fluxes (DEPRECATED)."""
-        raise NotImplementedError(
-            "LagrangianConservation is deprecated. Use CompatibleConservation."
-        )
-
-    def compute_residual(self, state: FlowState, grid: LagrangianGrid, fluxes):
-        """Compute residual (DEPRECATED)."""
-        raise NotImplementedError(
-            "LagrangianConservation is deprecated. Use CompatibleConservation."
-        )
-
-
 def compute_mass_error(state: FlowState, grid: LagrangianGrid) -> float:
     """
     Compute relative mass conservation error.

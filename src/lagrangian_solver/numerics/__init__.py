@@ -8,7 +8,6 @@ from lagrangian_solver.numerics.riemann import (
     HLLCRiemannSolver,
 )
 from lagrangian_solver.numerics.time_integration import (
-    HeunIntegrator,
     CompatibleHeunIntegrator,
     CompatibleForwardEulerIntegrator,
     CompatibleSSPRK3Integrator,
@@ -27,19 +26,21 @@ from lagrangian_solver.numerics.boundary_riemann import (
 )
 
 __all__ = [
+    # Riemann solvers (for analytical solutions and boundary conditions)
     "RiemannState",
     "RiemannSolution",
     "RiemannSolverBase",
     "ExactRiemannSolver",
     "HLLCRiemannSolver",
-    "HeunIntegrator",
+    "BoundaryRiemannSolver",
+    "BoundaryState",
+    # Time integration (compatible discretization)
     "CompatibleHeunIntegrator",
     "CompatibleForwardEulerIntegrator",
     "CompatibleSSPRK3Integrator",
+    # Artificial viscosity and heat conduction
     "ArtificialViscosity",
     "ArtificialViscosityConfig",
     "ArtificialHeatConduction",
     "ArtificialHeatConductionConfig",
-    "BoundaryRiemannSolver",
-    "BoundaryState",
 ]

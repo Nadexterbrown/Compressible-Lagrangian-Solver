@@ -4,7 +4,7 @@ from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.core.state import FlowState, ConservedVariables
 
 # Solver imported lazily to avoid circular imports
-# Use: from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+# Use: from lagrangian_solver.core.solver import CompatibleLagrangianSolver, SolverConfig
 
 __all__ = [
     "FlowState",
