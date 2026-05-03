@@ -190,9 +190,6 @@ class BoundaryConfig:
         temperature: Wall/piston temperature [K] (for isothermal)
         velocity: Piston velocity [m/s] or profile name
         back_pressure: Back pressure [Pa] (for open BC)
-        porous: Whether boundary is porous
-        permeability: Darcy permeability [m²]
-        slip_coefficient: Beavers-Joseph slip coefficient
     """
 
     bc_type: BoundaryConditionType = BoundaryConditionType.SOLID_WALL
@@ -200,9 +197,6 @@ class BoundaryConfig:
     temperature: Optional[float] = None
     velocity: Union[float, str, None] = None
     back_pressure: Optional[float] = None
-    porous: bool = False
-    permeability: float = 0.0
-    slip_coefficient: float = 0.0
 
 
 @dataclass

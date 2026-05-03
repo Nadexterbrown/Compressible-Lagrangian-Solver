@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lagrangian_solver import LagrangianGrid, FlowState, GridConfig
 from lagrangian_solver.core.state import create_uniform_state
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 from lagrangian_solver.equations.eos import CanteraEOS
 from lagrangian_solver.boundary.base import BoundarySide, ThermalBCType
 from lagrangian_solver.boundary.open import OpenBC
@@ -474,6 +474,8 @@ def run_reconstruction(
     velocity_offset: float = 0.0,
     velocity_min: float = None,
     gas_velocity_offset: float = None,
+    use_gas_velocity_data: bool = False,
+    gas_offset_data: str = None,
     gas_velocity_min: float = None,
     n_records: int = 1000,
     output_dir: str = None,
@@ -508,9 +510,18 @@ def run_reconstruction(
     velocity_min : float, optional
         Minimum allowed piston velocity [m/s] (default None = no clamping)
     gas_velocity_offset : float, optional
-        If specified, use PorousGhostPistonBC with gas velocity = piston velocity + offset.
+        If specified, use MovingPorousPistonBC with gas velocity = piston velocity + offset.
         For example, -119 means gas velocity is 119 m/s slower than piston velocity.
         Default None uses solid piston BC (MovingDataDrivenPistonBC).
+    use_gas_velocity_data : bool, optional
+        If True, use flame_gas_velocity from trajectory data directly for gas velocity.
+        Uses MovingPorousPistonBC with gas_velocity_func=trajectory.gas_velocity.
+        Cannot be used together with gas_velocity_offset.
+    gas_offset_data : str, optional
+        Column header name for gas velocity offset (e.g., "Flame Burning Velocity [m / s]").
+        When specified, gas velocity = piston velocity - offset_data(t).
+        Uses MovingPorousPistonBC with computed gas velocity function.
+        Cannot be used together with gas_velocity_offset or use_gas_velocity_data.
     gas_velocity_min : float, optional
         Minimum allowed gas velocity [m/s] when using porous BC.
         Gas velocity is clamped to this value. Default None = no clamping.
@@ -534,15 +545,21 @@ def run_reconstruction(
 
         print(f"\nLoading PeleC trajectory data from: {data_dir}")
 
-        loader = PeleDataLoader(data_dir)
+        loader = PeleDataLoader(data_dir, gas_offset_column=gas_offset_data)
         data = loader.load(parts)
         trajectory = PeleTrajectoryInterpolator(data, extrapolate=False)
 
         print(f"  {trajectory}")
         print(f"  Flame velocity range: [{data.flame_velocity.min():.1f}, {data.flame_velocity.max():.1f}] m/s")
+        if gas_offset_data is not None:
+            print(f"  Gas offset column: '{gas_offset_data}'")
+            print(f"  Gas offset range: [{data.gas_offset_data.min():.1f}, {data.gas_offset_data.max():.1f}] m/s")
 
     elif data_source == DataSource.SYNTHETIC:
         # Load synthetic CSV data
+        if gas_offset_data is not None:
+            raise ValueError("--gas-offset-data is only supported for PeleC data source, not synthetic.")
+
         if data_path is None:
             data_file = Path(__file__).parent / "pele_data" / "synthetic_data" / "pele_collective_data.csv"
         else:
@@ -565,7 +582,14 @@ def run_reconstruction(
 
     # Setup output directory
     if output_dir is None:
-        bc_subdir = "porous" if gas_velocity_offset is not None else "solid"
+        if use_gas_velocity_data:
+            bc_subdir = "porous_data"
+        elif gas_offset_data is not None:
+            bc_subdir = "porous_offset_data"
+        elif gas_velocity_offset is not None:
+            bc_subdir = "porous"
+        else:
+            bc_subdir = "solid"
         output_dir = Path(__file__).parent / "results" / bc_subdir
     else:
         output_dir = Path(output_dir)
@@ -586,7 +610,11 @@ def run_reconstruction(
     state, rho_init, c_init = create_initial_state(grid, eos, INPUT_PARAMS_CONFIG['T'], INPUT_PARAMS_CONFIG['P'])
 
     # Determine if using porous BC
-    use_porous = gas_velocity_offset is not None
+    porous_options = [gas_velocity_offset is not None, use_gas_velocity_data, gas_offset_data is not None]
+    if sum(porous_options) > 1:
+        raise ValueError("Cannot use multiple gas velocity options. "
+                         "Choose one of: --gas-velocity-offset, --use-gas-velocity-data, or --gas-offset-data.")
+    use_porous = any(porous_options)
 
     print(f"\nSimulation setup:")
     print(f"  Domain: {domain_length} m, {n_cells} cells")
@@ -600,7 +628,17 @@ def run_reconstruction(
     if velocity_min is not None:
         print(f"  Velocity min: {velocity_min} m/s")
     if use_porous:
-        print(f"  BC Type: POROUS (gas_velocity_offset = {gas_velocity_offset:+.1f} m/s)")
+        if use_gas_velocity_data:
+            print(f"  BC Type: POROUS (using flame_gas_velocity data directly)")
+            print(f"  Gas velocity data range: [{data.flame_gas_velocity.min():.1f}, {data.flame_gas_velocity.max():.1f}] m/s")
+        elif gas_offset_data is not None:
+            print(f"  BC Type: POROUS (u_gas = u_piston - '{gas_offset_data}')")
+            # Compute expected gas velocity range
+            u_gas_min = data.flame_velocity.min() - data.gas_offset_data.max()
+            u_gas_max = data.flame_velocity.max() - data.gas_offset_data.min()
+            print(f"  Expected gas velocity range: [{u_gas_min:.1f}, {u_gas_max:.1f}] m/s")
+        else:
+            print(f"  BC Type: POROUS (gas_velocity_offset = {gas_velocity_offset:+.1f} m/s)")
         if gas_velocity_min is not None:
             print(f"  Gas velocity min: {gas_velocity_min} m/s")
     else:
@@ -609,28 +647,54 @@ def run_reconstruction(
     # Create boundary conditions
     if use_porous:
         # Porous piston BC using MovingPorousPistonBC with trajectory
-        # Gas velocity = piston velocity + gas_velocity_offset
 
-        # Warn about large velocity differences
-        max_diff = abs(gas_velocity_offset) if gas_velocity_offset else 0
-        if max_diff > 0.1 * c_init:  # More than 10% of sound speed
-            print(f"\n  WARNING: Large velocity difference ({max_diff:.1f} m/s).")
-            print(f"           This may cause numerical instability (cell collapse).")
-            print(f"           The porous BC can only handle moderate velocity differences")
-            print(f"           before the boundary cell drains completely.")
-            print(f"           Consider one of:")
-            print(f"           1. Use a smaller offset (e.g., --gas-velocity-offset -50)")
-            print(f"           2. Allow negative gas velocities (don't set --gas-velocity-min)")
-            print(f"           3. Increase resolution (--cells 1000)")
-            print()
+        if use_gas_velocity_data:
+            # Use flame_gas_velocity data directly via gas_velocity_func
+            # The trajectory already has gas_velocity() method that interpolates flame_gas_velocity
+            left_bc = MovingPorousPistonBC(
+                side=BoundarySide.LEFT, eos=eos,
+                trajectory=trajectory,
+                gas_velocity_func=trajectory.gas_velocity,
+                gas_velocity_min=gas_velocity_min,
+                thermal_bc=ThermalBCType.ADIABATIC,
+            )
+        elif gas_offset_data is not None:
+            # Gas velocity = piston velocity - offset_data(t)
+            # Create a function that computes u_gas = u_piston - S_c
+            def gas_velocity_from_offset(t: float) -> float:
+                u_piston = trajectory.velocity(t)
+                offset = trajectory.gas_offset(t)
+                return u_piston - offset
 
-        left_bc = MovingPorousPistonBC(
-            side=BoundarySide.LEFT, eos=eos,
-            trajectory=trajectory,
-            gas_velocity_offset=gas_velocity_offset,
-            gas_velocity_min=gas_velocity_min,
-            thermal_bc=ThermalBCType.ADIABATIC,
-        )
+            left_bc = MovingPorousPistonBC(
+                side=BoundarySide.LEFT, eos=eos,
+                trajectory=trajectory,
+                gas_velocity_func=gas_velocity_from_offset,
+                gas_velocity_min=gas_velocity_min,
+                thermal_bc=ThermalBCType.ADIABATIC,
+            )
+        else:
+            # Gas velocity = piston velocity + gas_velocity_offset
+            # Warn about large velocity differences
+            max_diff = abs(gas_velocity_offset) if gas_velocity_offset else 0
+            if max_diff > 0.1 * c_init:  # More than 10% of sound speed
+                print(f"\n  WARNING: Large velocity difference ({max_diff:.1f} m/s).")
+                print(f"           This may cause numerical instability (cell collapse).")
+                print(f"           The porous BC can only handle moderate velocity differences")
+                print(f"           before the boundary cell drains completely.")
+                print(f"           Consider one of:")
+                print(f"           1. Use a smaller offset (e.g., --gas-velocity-offset -50)")
+                print(f"           2. Allow negative gas velocities (don't set --gas-velocity-min)")
+                print(f"           3. Increase resolution (--cells 1000)")
+                print()
+
+            left_bc = MovingPorousPistonBC(
+                side=BoundarySide.LEFT, eos=eos,
+                trajectory=trajectory,
+                gas_velocity_offset=gas_velocity_offset,
+                gas_velocity_min=gas_velocity_min,
+                thermal_bc=ThermalBCType.ADIABATIC,
+            )
     else:
         # Solid piston BC
         left_bc = MovingDataDrivenPistonBC(
@@ -660,7 +724,14 @@ def run_reconstruction(
     estimated_steps = int(t_end / dt_approx)
     record_interval = max(1, estimated_steps // n_records)
 
-    bc_type = "porous" if use_porous else "solid"
+    if use_gas_velocity_data:
+        bc_type = "porous_data"
+    elif gas_offset_data is not None:
+        bc_type = "porous_offset_data"
+    elif gas_velocity_offset is not None:
+        bc_type = "porous_offset"
+    else:
+        bc_type = "solid"
     print(f"\nRunning: {bc_type} piston reconstruction")
     print(f"  Target records: {n_records}, record every {record_interval} steps")
 
@@ -728,6 +799,8 @@ def run_reconstruction(
         "velocity_offset": velocity_offset,
         "velocity_min": velocity_min,
         "gas_velocity_offset": gas_velocity_offset,
+        "use_gas_velocity_data": use_gas_velocity_data,
+        "gas_offset_data": gas_offset_data,
         "gas_velocity_min": gas_velocity_min,
         "data_source": str(data_dir),
         "n_data_points": len(data.time),
@@ -799,9 +872,18 @@ def main():
     parser.add_argument("--velocity-min", type=float, default=None,
                         help="Minimum allowed piston velocity [m/s] (default: None, no clamping)")
     parser.add_argument("--gas-velocity-offset", type=float, default=None,
-                        help="Gas velocity offset for porous BC [m/s]. If specified, uses PorousGhostPistonBC "
+                        help="Gas velocity offset for porous BC [m/s]. If specified, uses MovingPorousPistonBC "
                              "with gas_velocity = piston_velocity + offset. Use negative for slower gas. "
                              "(default: None, uses solid piston BC)")
+    parser.add_argument("--use-gas-velocity-data", action="store_true",
+                        help="Use flame_gas_velocity from trajectory data directly for gas velocity. "
+                             "Uses MovingPorousPistonBC with gas_velocity_func=trajectory.gas_velocity. "
+                             "This uses the actual unburned gas velocity (u_uf) from PeleC data. "
+                             "Cannot be used together with --gas-velocity-offset or --gas-offset-data.")
+    parser.add_argument("--gas-offset-data", type=str, default=None,
+                        help="Column header name for gas velocity offset (e.g., 'Flame Burning Velocity [m / s]'). "
+                             "Gas velocity = piston velocity - offset_data(t). "
+                             "Cannot be used together with --gas-velocity-offset or --use-gas-velocity-data.")
     parser.add_argument("--gas-velocity-min", type=float, default=None,
                         help="Minimum allowed gas velocity [m/s] for porous BC. Use 0 to prevent negative "
                              "gas velocities. (default: None, no clamping)")
@@ -823,6 +905,8 @@ def main():
         velocity_offset=args.velocity_offset,
         velocity_min=args.velocity_min,
         gas_velocity_offset=args.gas_velocity_offset,
+        use_gas_velocity_data=args.use_gas_velocity_data,
+        gas_offset_data=args.gas_offset_data,
         gas_velocity_min=args.gas_velocity_min,
         n_records=args.n_records,
         output_dir=args.output_dir,

@@ -26,7 +26,9 @@ class PeleTrajectoryData:
     pressure: Optional[np.ndarray] = None           # [Pa]
     temperature: Optional[np.ndarray] = None        # [K]
     density: Optional[np.ndarray] = None            # [kg/m³]
+    sound_speed: Optional[np.ndarray] = None        # [m/s]
     burned_gas_velocity: Optional[np.ndarray] = None  # [m/s]
+    gas_offset_data: Optional[np.ndarray] = None    # [m/s] - arbitrary column for gas velocity offset
 
     def __post_init__(self):
         """Validate data consistency."""
@@ -49,9 +51,10 @@ class PeleDataLoader:
         1: Time
         3: Flame Position [m]
         4: Flame Gas Velocity [m/s]
-        6: Flame Thermodynamic Pressure [Pa]
         5: Flame Thermodynamic Temperature [K]
+        6: Flame Thermodynamic Pressure [Pa]
         7: Flame Thermodynamic Density [kg/m³]
+        8: Sound Speed [m/s]
         14: Flame Velocity [m/s]
         18: Burned Gas Gas Velocity [m/s]
     """
@@ -63,6 +66,7 @@ class PeleDataLoader:
     COL_FLAME_TEMPERATURE = 4
     COL_FLAME_PRESSURE = 5
     COL_FLAME_DENSITY = 6
+    COL_SOUND_SPEED = 7
     COL_FLAME_VELOCITY = 13
     COL_BURNED_GAS_VELOCITY = 17
 
@@ -74,7 +78,8 @@ class PeleDataLoader:
         3: 8.136537e-04 + 8.6918377740062178e-04,
     }
 
-    def __init__(self, data_dir: str, time_offsets: Optional[dict] = None):
+    def __init__(self, data_dir: str, time_offsets: Optional[dict] = None,
+                 gas_offset_column: Optional[str] = None):
         """
         Initialize loader with data directory path.
 
@@ -85,12 +90,17 @@ class PeleDataLoader:
         time_offsets : dict, optional
             Dictionary mapping part number to time offset [s].
             If None, uses DEFAULT_TIME_OFFSETS.
+        gas_offset_column : str, optional
+            Column header name for gas velocity offset data (e.g., "Flame Burning Velocity [m / s]").
+            If specified, this column is loaded and stored in gas_offset_data.
         """
         self.data_dir = Path(data_dir)
         if not self.data_dir.exists():
             raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
         self.time_offsets = time_offsets if time_offsets is not None else self.DEFAULT_TIME_OFFSETS
+        self.gas_offset_column = gas_offset_column
+        self._header_map: Optional[dict] = None  # Column name -> index mapping
 
     def load(self, parts: Optional[List[int]] = None) -> PeleTrajectoryData:
         """
@@ -147,11 +157,25 @@ class PeleDataLoader:
                 continue
         return sorted(parts)
 
+    def _parse_headers(self, header_line: str) -> dict:
+        """Parse header line to create column name -> index mapping."""
+        # Remove leading '#' and split by multiple spaces (headers are space-padded)
+        header_line = header_line.lstrip('#').strip()
+        # Split on 2+ spaces to separate column names
+        import re
+        headers = re.split(r'\s{2,}', header_line)
+        # Create mapping: header name -> 0-based index
+        return {name.strip(): idx for idx, name in enumerate(headers)}
+
     def _load_part(self, filepath: Path) -> dict:
         """Load a single part file."""
         # Read all lines
         with open(filepath, 'r') as f:
             lines = f.readlines()
+
+        # Parse header line (line 2, index 1) for column name mapping
+        if self._header_map is None and len(lines) > 1:
+            self._header_map = self._parse_headers(lines[1])
 
         # Skip header lines (line 1: column numbers, line 2: column names)
         data_lines = lines[2:]
@@ -167,7 +191,7 @@ class PeleDataLoader:
 
         data = np.array(data)
 
-        return {
+        result = {
             'time': data[:, self.COL_TIME],
             'flame_position': data[:, self.COL_FLAME_POSITION],
             'flame_velocity': data[:, self.COL_FLAME_VELOCITY],
@@ -175,8 +199,21 @@ class PeleDataLoader:
             'pressure': data[:, self.COL_FLAME_PRESSURE],
             'temperature': data[:, self.COL_FLAME_TEMPERATURE],
             'density': data[:, self.COL_FLAME_DENSITY],
+            'sound_speed': data[:, self.COL_SOUND_SPEED],
             'burned_gas_velocity': data[:, self.COL_BURNED_GAS_VELOCITY],
         }
+
+        # Load gas offset column if specified
+        if self.gas_offset_column is not None:
+            if self._header_map is None:
+                raise ValueError("Could not parse headers from data file")
+            if self.gas_offset_column not in self._header_map:
+                available = list(self._header_map.keys())
+                raise ValueError(f"Column '{self.gas_offset_column}' not found. Available: {available}")
+            col_idx = self._header_map[self.gas_offset_column]
+            result['gas_offset_data'] = data[:, col_idx]
+
+        return result
 
     def _concatenate_parts(self, parts: List[dict]) -> PeleTrajectoryData:
         """Concatenate multiple part dictionaries into a single PeleTrajectoryData."""
@@ -188,7 +225,13 @@ class PeleDataLoader:
         pressure = np.concatenate([p['pressure'] for p in parts])
         temperature = np.concatenate([p['temperature'] for p in parts])
         density = np.concatenate([p['density'] for p in parts])
+        sound_speed = np.concatenate([p['sound_speed'] for p in parts])
         burned_gas_velocity = np.concatenate([p['burned_gas_velocity'] for p in parts])
+
+        # Gas offset data (optional)
+        gas_offset_data = None
+        if 'gas_offset_data' in parts[0]:
+            gas_offset_data = np.concatenate([p['gas_offset_data'] for p in parts])
 
         # Sort by time (in case parts overlap or are out of order)
         sort_idx = np.argsort(time)
@@ -205,7 +248,9 @@ class PeleDataLoader:
             pressure=pressure[final_idx],
             temperature=temperature[final_idx],
             density=density[final_idx],
+            sound_speed=sound_speed[final_idx],
             burned_gas_velocity=burned_gas_velocity[final_idx],
+            gas_offset_data=gas_offset_data[final_idx] if gas_offset_data is not None else None,
         )
 
 
@@ -266,6 +311,14 @@ class PeleTrajectoryInterpolator:
         else:
             self._interp_temperature = None
 
+        if data.sound_speed is not None:
+            self._interp_sound_speed = interp1d(
+                data.time, data.sound_speed,
+                kind='linear', bounds_error=bounds_error, fill_value=fill_value
+            )
+        else:
+            self._interp_sound_speed = None
+
         if data.burned_gas_velocity is not None:
             self._interp_burned_gas_velocity = interp1d(
                 data.time, data.burned_gas_velocity,
@@ -273,6 +326,14 @@ class PeleTrajectoryInterpolator:
             )
         else:
             self._interp_burned_gas_velocity = None
+
+        if data.gas_offset_data is not None:
+            self._interp_gas_offset = interp1d(
+                data.time, data.gas_offset_data,
+                kind='linear', bounds_error=bounds_error, fill_value=fill_value
+            )
+        else:
+            self._interp_gas_offset = None
 
     @property
     def t_min(self) -> float:
@@ -313,11 +374,23 @@ class PeleTrajectoryInterpolator:
             return None
         return float(self._interp_temperature(t))
 
+    def sound_speed(self, t: float) -> Optional[float]:
+        """Interpolate sound speed at time t."""
+        if self._interp_sound_speed is None:
+            return None
+        return float(self._interp_sound_speed(t))
+
     def burned_gas_velocity(self, t: float) -> Optional[float]:
         """Interpolate burned gas velocity at time t."""
         if self._interp_burned_gas_velocity is None:
             return None
         return float(self._interp_burned_gas_velocity(t))
+
+    def gas_offset(self, t: float) -> Optional[float]:
+        """Interpolate gas velocity offset at time t."""
+        if self._interp_gas_offset is None:
+            return None
+        return float(self._interp_gas_offset(t))
 
     def __repr__(self) -> str:
         return (
@@ -344,6 +417,7 @@ if __name__ == "__main__":
     print(f"  Position range: [{data.flame_position.min():.6e}, {data.flame_position.max():.6e}] m")
     print(f"  Flame velocity range: [{data.flame_velocity.min():.1f}, {data.flame_velocity.max():.1f}] m/s")
     print(f"  Gas velocity range: [{data.flame_gas_velocity.min():.1f}, {data.flame_gas_velocity.max():.1f}] m/s")
+    print(f"  Sound speed range: [{data.sound_speed.min():.1f}, {data.sound_speed.max():.1f}] m/s")
 
     # Test interpolator
     interp = PeleTrajectoryInterpolator(data)

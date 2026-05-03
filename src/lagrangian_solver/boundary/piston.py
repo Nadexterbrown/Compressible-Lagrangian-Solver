@@ -1499,6 +1499,7 @@ class MovingPorousPistonBC(BoundaryCondition):
         trajectory: TrajectoryInterpolator,
         gas_velocity_offset: float = 0.0,
         gas_velocity_min: Optional[float] = None,
+        gas_velocity_func: Optional[Callable[[float], float]] = None,
         time_offset: float = 0.0,
         tol: float = 1e-8,
         thermal_bc: ThermalBCType = ThermalBCType.ADIABATIC,
@@ -1519,8 +1520,13 @@ class MovingPorousPistonBC(BoundaryCondition):
         gas_velocity_offset : float
             Value added to piston velocity to get gas velocity [m/s].
             Negative = gas slower than piston.
+            Ignored if gas_velocity_func is provided.
         gas_velocity_min : float, optional
             Minimum allowed gas velocity [m/s] (default None = no clamping)
+        gas_velocity_func : callable, optional
+            Function u_gas(t) returning gas velocity [m/s].
+            If provided, overrides gas_velocity_offset calculation.
+            Useful for data-driven gas velocity from trajectory.
         time_offset : float
             Time offset [s] (simulation_time = data_time + time_offset)
         tol : float
@@ -1535,6 +1541,7 @@ class MovingPorousPistonBC(BoundaryCondition):
         self._trajectory = trajectory
         self._gas_velocity_offset = gas_velocity_offset
         self._gas_velocity_min = gas_velocity_min
+        self._gas_velocity_func = gas_velocity_func
         self._time_offset = time_offset
         self._tol = tol
         self._thermal_bc = thermal_bc
@@ -1600,12 +1607,18 @@ class MovingPorousPistonBC(BoundaryCondition):
         """
         Get gas velocity at boundary at time t.
 
-        Applies transformations:
+        If gas_velocity_func was provided, uses it directly.
+        Otherwise applies transformations:
             v_gas = v_piston + offset
             v_gas = max(v_gas, v_min) if v_min specified
         """
-        v_piston = self.get_piston_velocity(t)
-        v_gas = v_piston + self._gas_velocity_offset
+        if self._gas_velocity_func is not None:
+            # Use provided gas velocity function directly
+            v_gas = self._gas_velocity_func(t)
+        else:
+            # Compute from piston velocity + offset
+            v_piston = self.get_piston_velocity(t)
+            v_gas = v_piston + self._gas_velocity_offset
 
         # Apply minimum velocity clamp if specified
         if self._gas_velocity_min is not None:
@@ -1625,6 +1638,31 @@ class MovingPorousPistonBC(BoundaryCondition):
         """Get piston position at time t from trajectory."""
         t_data = self._get_data_time(t)
         return self._trajectory.position(t_data)
+
+    def get_max_dt_constraint(self, grid: LagrangianGrid) -> float:
+        """
+        Additional CFL constraint: don't drain >10% of boundary cell per step.
+
+        This prevents the boundary cell from becoming too small in a single
+        time step, which could cause numerical instability.
+
+        Args:
+            grid: Lagrangian grid
+
+        Returns:
+            Maximum allowed time step [s]
+        """
+        u_p = self.get_piston_velocity(self._current_time)
+        u_g = self.get_gas_velocity(self._current_time)
+        leak_speed = abs(u_p - u_g)
+
+        if leak_speed < 1e-15:
+            return float('inf')
+
+        # Use cell width as proxy for mass drainage rate
+        # Conservative: 10% of cell per step
+        dx_boundary = grid.dx[self.cell_index]
+        return 0.1 * dx_boundary / leak_speed
 
     def get_mass_flux(
         self,
