@@ -225,7 +225,7 @@ class OutputManager:
             filename: Output filename
             **kwargs: Additional arguments for savefig (e.g., dpi, bbox_inches)
         """
-        defaults = {"dpi": 150, "bbox_inches": "tight"}
+        defaults = {"dpi": 300, "bbox_inches": "tight"}
         defaults.update(kwargs)
 
         path = self.get_plot_path(filename)

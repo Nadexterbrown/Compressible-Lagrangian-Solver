@@ -14,9 +14,24 @@ Reference: [Toro2009] Section 4.3.3, Table 4.1
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from pathlib import Path
 import sys
 import argparse
+
+# Publication-quality plot settings
+plt.rcParams.update({
+    'font.family': 'serif',
+    'font.serif': ['Times New Roman'],
+    'font.size': 24,
+    'axes.labelsize': 24,
+    'axes.titlesize': 24,
+    'xtick.labelsize': 22,
+    'ytick.labelsize': 22,
+    'legend.fontsize': 20,
+    'figure.titlesize': 18,
+    'mathtext.fontset': 'stix',  # Use STIX fonts for math (compatible with Times)
+})
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -24,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from lagrangian_solver.equations.eos import IdealGasEOS
 from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.core.state import create_riemann_state
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver, RiemannState
 from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosityConfig
 from lagrangian_solver.boundary.wall import SolidWallBC
@@ -142,9 +157,6 @@ def run_toro_test(
     grid_config = GridConfig(n_cells=n_cells, x_min=0.0, x_max=1.0)
     grid = LagrangianGrid(grid_config)
 
-    # Create Riemann solver
-    riemann_solver = ExactRiemannSolver(eos, tol=1e-8, max_iter=100)
-
     # Create boundary conditions - use Open BC for Riemann problems
     # Provide external conditions from the initial state for cases with inflow
     left_data = test_data["left"]
@@ -166,13 +178,20 @@ def run_toro_test(
     )
 
     # Solver configuration with optional dt_min
+    # Extract AV settings from config if provided
+    av_enabled = av_config is not None
+    av_linear = av_config.c_linear if av_config else 0.3
+    av_quad = av_config.c_quad if av_config else 2.0
+
     solver_config = SolverConfig(
         cfl=cfl,
         t_end=test_data["t_end"],
         dt_output=test_data["t_end"],
         dt_min=dt_min,
         verbose=verbose,
-        artificial_viscosity=av_config,
+        av_enabled=av_enabled,
+        av_linear=av_linear,
+        av_quad=av_quad,
         hc_enabled=hc_enabled,
         hc_linear=hc_linear,
         hc_quad=hc_quad,
@@ -182,7 +201,6 @@ def run_toro_test(
     solver = LagrangianSolver(
         grid=grid,
         eos=eos,
-        riemann_solver=riemann_solver,
         bc_left=bc_left,
         bc_right=bc_right,
         config=solver_config,
@@ -280,42 +298,31 @@ def plot_toro_test_comparison(
     T_exact = e_exact / eos.cv
     s_exact = eos.entropy(rho_exact, p_exact)
 
-    # Create figure
+    # Create publication-quality figure
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-
-    # Build title with stats
-    status_str = "FAILED" if failed else ""
-    title_lines = [f"Toro Test {test_num}: {test_data['name']} {status_str}"]
-    t_reached = stats.final_time
-    title_lines.append(f"t = {t_reached:.4e} / {test_data['t_end']}, N = {n_cells} cells, steps = {stats.n_steps}")
-    if dt_min:
-        min_dt_str = f"{stats.min_dt:.2e}" if stats.min_dt < float('inf') else "N/A"
-        title_lines.append(f"dt_min = {dt_min:.0e} (min_dt used: {min_dt_str})")
-    if failed:
-        title_lines.append(f"Error: {error_msg[:60]}..." if len(error_msg) > 60 else f"Error: {error_msg}")
-
-    fig.suptitle("\n".join(title_lines), fontsize=14, fontweight="bold")
 
     # Plot variables
     variables = [
-        ("Density ρ", rho_exact, rho_num, "[kg/m³]"),
-        ("Velocity u", u_exact, u_num, "[m/s]"),
-        ("Pressure p", p_exact, p_num, "[Pa]"),
-        ("Internal Energy e", e_exact, e_num, "[J/kg]"),
-        ("Temperature T", T_exact, T_num, "[K]"),
-        ("Entropy s", s_exact, s_num, "[J/(kg·K)]"),
+        ("Density", r"$\rho$", rho_exact, rho_num, r"[kg/m$^3$]"),
+        ("Velocity", r"$u$", u_exact, u_num, "[m/s]"),
+        ("Pressure", r"$p$", p_exact, p_num, "[Pa]"),
+        ("Internal Energy", r"$e$", e_exact, e_num, "[J/kg]"),
+        ("Temperature", r"$T$", T_exact, T_num, "[K]"),
+        ("Entropy", r"$s$", s_exact, s_num, "[J/(kg K)]"),
     ]
 
-    for idx, (name, exact, num, unit) in enumerate(variables):
+    for idx, (name, symbol, exact, num, unit) in enumerate(variables):
         ax = axes[idx // 3, idx % 3]
-        ax.plot(x_exact, exact, "b-", linewidth=2, label="Exact")
-        ax.plot(x_num, num, "ro", markersize=3, label="Numerical")
-        ax.set_xlabel("x")
-        ax.set_ylabel(f"{name} {unit}")
-        ax.set_title(name)
-        ax.legend(loc="best")
+        ax.plot(x_exact, exact, "k-", linewidth=1.5, label="Exact")
+        ax.plot(x_num, num, "r.", markersize=4, label="Numerical")
+        ax.set_xlabel(r"$x$")
+        ax.set_ylabel(f"{symbol} {unit}")
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0, 1)
+
+        # Legend only in top-left subplot (idx=0)
+        if idx == 0:
+            ax.legend(loc="best")
 
     plt.tight_layout()
 
@@ -338,7 +345,148 @@ def plot_toro_test_comparison(
     )
     output_manager.add_result(result)
 
+    # Generate error plot
+    plot_toro_test_error(
+        test_num, output_manager, x_num, rho_num, u_num, p_num, e_num,
+        x_exact, rho_exact, u_exact, p_exact, e_exact, test_data, stats, failed
+    )
+
     return x_num, rho_num, u_num, p_num, stats, failed
+
+
+def plot_toro_test_error(
+    test_num: int,
+    output_manager: OutputManager,
+    x_num: np.ndarray,
+    rho_num: np.ndarray,
+    u_num: np.ndarray,
+    p_num: np.ndarray,
+    e_num: np.ndarray,
+    x_exact: np.ndarray,
+    rho_exact: np.ndarray,
+    u_exact: np.ndarray,
+    p_exact: np.ndarray,
+    e_exact: np.ndarray,
+    test_data: dict,
+    stats,
+    failed: bool,
+):
+    """
+    Plot percent error between exact and numerical solutions for a Toro test.
+
+    Creates a figure showing the pointwise percent error for each variable.
+    Error statistics are saved to a separate text file.
+    """
+    # Interpolate exact solution to numerical grid points
+    rho_exact_interp = np.interp(x_num, x_exact, rho_exact)
+    u_exact_interp = np.interp(x_num, x_exact, u_exact)
+    p_exact_interp = np.interp(x_num, x_exact, p_exact)
+    e_exact_interp = np.interp(x_num, x_exact, e_exact)
+
+    # Compute range-normalized error: |numerical - exact| / (max - min) * 100
+    # This avoids division by zero when exact = 0
+    def normalized_error(num, exact):
+        """Compute range-normalized percent error."""
+        range_val = np.max(exact) - np.min(exact)
+        if range_val < 1e-10:
+            range_val = np.max(np.abs(exact))  # Fallback to max for constant fields
+        if range_val < 1e-10:
+            range_val = 1.0  # Fallback for constant-zero fields
+        return np.abs(num - exact) / range_val * 100.0
+
+    rho_pct = normalized_error(rho_num, rho_exact_interp)
+    u_pct = normalized_error(u_num, u_exact_interp)
+    p_pct = normalized_error(p_num, p_exact_interp)
+    e_pct = normalized_error(e_num, e_exact_interp)
+
+    # Compute error statistics
+    def compute_error_stats(pct_err, num, exact):
+        """Compute error statistics: mean %, max %, L1, L2, L∞."""
+        pct_mean = np.mean(pct_err)
+        pct_max = np.max(pct_err)
+        # L-norms (relative to reference scale)
+        ref_scale = np.max(np.abs(exact)) if np.max(np.abs(exact)) > 1e-10 else 1.0
+        abs_err = np.abs(num - exact)
+        L1 = np.mean(abs_err) / ref_scale
+        L2 = np.sqrt(np.mean(abs_err**2)) / ref_scale
+        Linf = np.max(abs_err) / ref_scale
+        return pct_mean, pct_max, L1, L2, Linf
+
+    rho_stats_full = compute_error_stats(rho_pct, rho_num, rho_exact_interp)
+    u_stats_full = compute_error_stats(u_pct, u_num, u_exact_interp)
+    p_stats_full = compute_error_stats(p_pct, p_num, p_exact_interp)
+    e_stats_full = compute_error_stats(e_pct, e_num, e_exact_interp)
+
+    # Write error statistics to text file
+    error_filename = f"toro_test_{test_num}_error_stats.txt"
+    error_filepath = output_manager.output_dir / error_filename
+    with open(error_filepath, "w", encoding="utf-8") as f:
+        f.write(f"Toro Test {test_num}: {test_data['name']}\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Simulation time: t = {stats.final_time:.6e} s\n")
+        f.write(f"Number of cells: N = {len(x_num)}\n")
+        f.write(f"Time steps: {stats.n_steps}\n")
+        f.write(f"Status: {'FAILED' if failed else 'Completed'}\n\n")
+        f.write("-" * 60 + "\n")
+        f.write("ERROR STATISTICS\n")
+        f.write("-" * 60 + "\n\n")
+
+        variables = [
+            ("Density (ρ)", rho_stats_full),
+            ("Velocity (u)", u_stats_full),
+            ("Pressure (p)", p_stats_full),
+            ("Internal Energy (e)", e_stats_full),
+        ]
+
+        for name, (pct_mean, pct_max, L1, L2, Linf) in variables:
+            f.write(f"{name}:\n")
+            f.write(f"  Mean Percent Error: {pct_mean:.4f} %\n")
+            f.write(f"  Max Percent Error:  {pct_max:.4f} %\n")
+            f.write(f"  L1 norm (relative): {L1:.6e}\n")
+            f.write(f"  L2 norm (relative): {L2:.6e}\n")
+            f.write(f"  L∞ norm (relative): {Linf:.6e}\n")
+            f.write("\n")
+
+    print(f"    Error statistics saved: {error_filename}")
+
+    # Create figure (clean, no statistics in titles)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    status_str = " (FAILED)" if failed else ""
+    fig.suptitle(
+        f"Toro Test {test_num}: {test_data['name']} - Percent Error{status_str}\n"
+        f"t = {stats.final_time:.4e}, N = {len(x_num)} cells",
+        fontsize=14, fontweight="bold"
+    )
+
+    variables_plot = [
+        ("Density", r"$\frac{|\rho_{num} - \rho_{exact}|}{\Delta \rho_{exact}} \times 100$  [%]", rho_pct),
+        ("Velocity", r"$\frac{|u_{num} - u_{exact}|}{\Delta u_{exact}} \times 100$  [%]", u_pct),
+        ("Pressure", r"$\frac{|p_{num} - p_{exact}|}{\Delta p_{exact}} \times 100$  [%]", p_pct),
+        ("Internal Energy", r"$\frac{|e_{num} - e_{exact}|}{\Delta e_{exact}} \times 100$  [%]", e_pct),
+    ]
+
+    for idx, (name, ylabel, pct_err) in enumerate(variables_plot):
+        ax = axes[idx // 2, idx % 2]
+
+        ax.plot(x_num, pct_err, "b-", linewidth=1.0)
+        ax.axhline(y=0, color="k", linestyle="--", linewidth=0.5)
+        ax.fill_between(x_num, 0, pct_err, alpha=0.3)
+
+        ax.set_xlabel(r"$x$")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{name}")
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 1)
+
+    plt.tight_layout()
+
+    # Save figure
+    filename = f"toro_test_{test_num}_error.png"
+    output_manager.save_figure(fig, filename)
+    print(f"    Error plot saved: {filename}")
+
+    plt.close(fig)
 
 
 def create_all_tests_comparison(output_dir: Path):
@@ -378,31 +526,31 @@ def create_all_tests_comparison(output_dir: Path):
         row = test_num - 1
 
         # Density
-        axes[row, 0].plot(x_exact, rho_exact, "b-", linewidth=1.5, label="Exact")
-        axes[row, 0].plot(x_num, rho_num, "r.", markersize=2, label="Numerical")
+        axes[row, 0].plot(x_exact, rho_exact, "k-", linewidth=1.5, label="Exact")
+        axes[row, 0].plot(x_num, rho_num, "r.", markersize=3, label="Numerical")
         axes[row, 0].set_ylabel(f"Test {test_num}\nρ")
         axes[row, 0].grid(True, alpha=0.3)
         if row == 0:
             axes[row, 0].set_title("Density")
-            axes[row, 0].legend(loc="best", fontsize=8)
+            #axes[row, 0].legend(loc="best", fontsize=8)
 
         # Velocity
-        axes[row, 1].plot(x_exact, u_exact, "b-", linewidth=1.5)
-        axes[row, 1].plot(x_num, u_num, "r.", markersize=2)
+        axes[row, 1].plot(x_exact, u_exact, "k-", linewidth=1.5)
+        axes[row, 1].plot(x_num, u_num, "r.", markersize=3)
         axes[row, 1].grid(True, alpha=0.3)
         if row == 0:
-            axes[row, 1].set_title("Velocity")
+            axes[row, 1].set_title("Velocity [m/s]")
 
         # Pressure
-        axes[row, 2].plot(x_exact, p_exact, "b-", linewidth=1.5)
-        axes[row, 2].plot(x_num, p_num, "r.", markersize=2)
+        axes[row, 2].plot(x_exact, p_exact, "k-", linewidth=1.5)
+        axes[row, 2].plot(x_num, p_num, "r.", markersize=3)
         axes[row, 2].grid(True, alpha=0.3)
         if row == 0:
-            axes[row, 2].set_title("Pressure")
+            axes[row, 2].set_title("Pressure [Pa]")
 
         # Internal Energy
-        axes[row, 3].plot(x_exact, e_exact, "b-", linewidth=1.5)
-        axes[row, 3].plot(x_num, e_num, "r.", markersize=2)
+        axes[row, 3].plot(x_exact, e_exact, "k-", linewidth=1.5)
+        axes[row, 3].plot(x_num, e_num, "r.", markersize=3)
         axes[row, 3].grid(True, alpha=0.3)
         if row == 0:
             axes[row, 3].set_title("Internal Energy")
@@ -423,7 +571,7 @@ def create_all_tests_comparison(output_dir: Path):
     plt.tight_layout()
 
     fig.savefig(output_dir / "toro_all_tests_comparison.png",
-                dpi=150, bbox_inches="tight")
+                dpi=300, bbox_inches="tight")
     print(f"Saved: toro_all_tests_comparison.png")
 
     plt.close(fig)

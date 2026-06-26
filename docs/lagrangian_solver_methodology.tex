@@ -386,6 +386,64 @@ The time step is limited by the Courant-Friedrichs-Lewy (CFL) condition \citep{C
 
 \noindent where $u_i$ and $u_{i+1}$ are the face velocities bounding cell $i$, $c_i$ is the cell sound speed, and $C_{\text{CFL}} \leq 1$ is the CFL number. Using the maximum face velocity (rather than cell-centered velocity) provides a more conservative estimate that correctly handles supersonic boundary conditions. For the second-order Heun scheme, we typically use $C_{\text{CFL}} = 0.5$.
 
+\subsection{Complete Time-Stepping Algorithm}
+
+The complete time-stepping procedure is given in Algorithm~\ref{alg:timestepping}.
+
+\begin{algorithm}[H]
+\caption{Compatible Lagrangian Hydrodynamics with Heun's Method}
+\label{alg:timestepping}
+\begin{algorithmic}[1]
+\Require Initial state: $\tau_i^0, u_j^0, e_i^0, x_j^0$ for cells $i = 0, \ldots, N-1$ and faces $j = 0, \ldots, N$
+\Require Cell masses $\Delta m_i$ (constant), equation of state $p = p(\rho, e)$
+\Require CFL number $C_{\text{CFL}} \leq 1$, artificial viscosity coefficients $c_q, c_\ell$
+\Ensure Solution at $t = t^{\text{final}}$
+\State
+\While{$t^n < t^{\text{final}}$}
+    \State
+    \State \textit{Step 1: Compute stable time step}
+    \State $\Delta t \gets C_{\text{CFL}} \cdot \displaystyle\min_{i} \left( \frac{\Delta x_i}{\max(|u_i|, |u_{i+1}|) + c_i} \right)$
+    \State
+    \State \textit{Step 2: Compute right-hand side at $t^n$}
+    \For{$i = 0, \ldots, N-1$}
+        \State $\Delta u_i \gets u_{i+1} - u_i$
+        \State $Q_i \gets \begin{cases} \rho_i \left( c_q |\Delta u_i|^2 + c_\ell \, c_i |\Delta u_i| \right) & \text{if } \Delta u_i < 0 \\ 0 & \text{otherwise} \end{cases}$
+        \State $\sigma_i \gets p_i + Q_i$
+        \State $\dot{\tau}_i^n \gets \dfrac{u_{i+1} - u_i}{\Delta m_i}$
+        \State $\dot{e}_i^n \gets -\sigma_i \, \dot{\tau}_i^n$
+    \EndFor
+    \For{$j = 1, \ldots, N-1$}
+        \State $\Delta m_j^u \gets \dfrac{\Delta m_{j-1} + \Delta m_j}{2}$
+        \State $\dot{u}_j^n \gets -\dfrac{\sigma_j - \sigma_{j-1}}{\Delta m_j^u}$
+    \EndFor
+    \For{$j = 0, \ldots, N$}
+        \State $\dot{x}_j^n \gets u_j^n$
+    \EndFor
+    \State
+    \State \textit{Step 3: Predictor step}
+    \State $\tilde{\tau}_i \gets \tau_i^n + \Delta t \, \dot{\tau}_i^n \quad$ for $i = 0, \ldots, N-1$
+    \State $\tilde{u}_j \gets u_j^n + \Delta t \, \dot{u}_j^n \quad$ for $j = 0, \ldots, N$
+    \State $\tilde{e}_i \gets e_i^n + \Delta t \, \dot{e}_i^n \quad$ for $i = 0, \ldots, N-1$
+    \State $\tilde{x}_j \gets x_j^n + \Delta t \, \dot{x}_j^n \quad$ for $j = 0, \ldots, N$
+    \State $\tilde{\rho}_i \gets 1/\tilde{\tau}_i$, \quad $\tilde{p}_i, \tilde{c}_i \gets \text{EOS}(\tilde{\rho}_i, \tilde{e}_i)$
+    \State
+    \State \textit{Step 4: Compute right-hand side at predicted state}
+    \State Repeat Step 2 with $(\tilde{\tau}, \tilde{u}, \tilde{e}, \tilde{x}, \tilde{p}, \tilde{c})$ to obtain $(\dot{\tilde{\tau}}_i, \dot{\tilde{u}}_j, \dot{\tilde{e}}_i, \dot{\tilde{x}}_j)$
+    \State
+    \State \textit{Step 5: Corrector step}
+    \State $\tau_i^{n+1} \gets \tau_i^n + \dfrac{\Delta t}{2} \left( \dot{\tau}_i^n + \dot{\tilde{\tau}}_i \right) \quad$ for $i = 0, \ldots, N-1$
+    \State $u_j^{n+1} \gets u_j^n + \dfrac{\Delta t}{2} \left( \dot{u}_j^n + \dot{\tilde{u}}_j \right) \quad$ for $j = 0, \ldots, N$
+    \State $e_i^{n+1} \gets e_i^n + \dfrac{\Delta t}{2} \left( \dot{e}_i^n + \dot{\tilde{e}}_i \right) \quad$ for $i = 0, \ldots, N-1$
+    \State $x_j^{n+1} \gets x_j^n + \dfrac{\Delta t}{2} \left( \dot{x}_j^n + \dot{\tilde{x}}_j \right) \quad$ for $j = 0, \ldots, N$
+    \State $\rho_i^{n+1} \gets 1/\tau_i^{n+1}$, \quad $p_i^{n+1}, c_i^{n+1} \gets \text{EOS}(\rho_i^{n+1}, e_i^{n+1})$
+    \State
+    \State $t^{n+1} \gets t^n + \Delta t$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+\noindent \textbf{Notation:} $\tau_i$ is specific volume, $u_j$ is face velocity, $e_i$ is specific internal energy, $x_j$ is face position, $p_i$ is pressure, $c_i$ is sound speed, $\rho_i = 1/\tau_i$ is density, $\sigma_i$ is total stress, $Q_i$ is artificial viscosity, $\Delta m_i$ is cell mass, and $\Delta m_j^u$ is the dual cell mass for momentum. Subscript $i$ denotes cell-centered quantities; subscript $j$ denotes face-centered quantities.
+
 %=============================================================================
 \section{Boundary Conditions}
 \label{sec:boundary}
@@ -599,6 +657,57 @@ Finally, we recompute pressure, temperature, and sound speed from the equation o
 \begin{equation}
     p = p(\rho_{\text{avg}}, e_{\text{avg}}), \quad T = T(\rho_{\text{avg}}, e_{\text{avg}}), \quad c = c(\rho_{\text{avg}}, p).
 \end{equation}
+
+\subsection{Remapping Algorithm}
+
+The complete conservative remapping procedure is given in Algorithm~\ref{alg:remapping}.
+
+\begin{algorithm}[H]
+\caption{Conservative Cell Remapping}
+\label{alg:remapping}
+\begin{algorithmic}[1]
+\Require Boundary cell index $i_b$, neighbor index $i_n$, face indices $(j_L, j_M, j_R)$
+\Ensure Mass, momentum, and total energy exactly conserved
+\State
+\State \textbf{Step 1: Compute conserved quantities before remapping}
+\State $m_{\text{total}} \gets \Delta m_{i_b} + \Delta m_{i_n}$
+\State $V_{\text{total}} \gets \Delta x_{i_b} + \Delta x_{i_n}$
+\State $u_{i_b}^c \gets (u_{j_L} + u_{j_M})/2$ \Comment{Cell-centered velocities}
+\State $u_{i_n}^c \gets (u_{j_M} + u_{j_R})/2$
+\State $P_{\text{total}} \gets \Delta m_{i_b} \cdot u_{i_b}^c + \Delta m_{i_n} \cdot u_{i_n}^c$ \Comment{Total momentum}
+\State $\text{IE}_{\text{total}} \gets \Delta m_{i_b} \cdot e_{i_b} + \Delta m_{i_n} \cdot e_{i_n}$ \Comment{Total internal energy}
+\State $\text{KE}_{\text{total}} \gets \frac{1}{2}\Delta m_{i_b}(u_{i_b}^c)^2 + \frac{1}{2}\Delta m_{i_n}(u_{i_n}^c)^2$ \Comment{Total kinetic energy}
+\State $E_{\text{total}} \gets \text{IE}_{\text{total}} + \text{KE}_{\text{total}}$
+\State
+\State \textbf{Step 2: Redistribute mass equally}
+\State $\Delta m_{i_b} \gets m_{\text{total}}/2$
+\State $\Delta m_{i_n} \gets m_{\text{total}}/2$
+\State
+\State \textbf{Step 3: Move interface to equalize volumes}
+\State $x_{j_M} \gets x_{j_L} + V_{\text{total}}/2$
+\State $\rho_{\text{avg}} \gets m_{\text{total}} / V_{\text{total}}$
+\State
+\State \textbf{Step 4: Adjust interior face velocity for momentum conservation}
+\State $u_{j_M}^{\text{new}} \gets \dfrac{2 P_{\text{total}}}{m_{\text{total}}} - \dfrac{u_{j_L} + u_{j_R}}{2}$
+\State $u_{j_M} \gets u_{j_M}^{\text{new}}$
+\State
+\State \textbf{Step 5: Compute new kinetic energy}
+\State $u_{i_b}^{c,\text{new}} \gets (u_{j_L} + u_{j_M}^{\text{new}})/2$
+\State $u_{i_n}^{c,\text{new}} \gets (u_{j_M}^{\text{new}} + u_{j_R})/2$
+\State $\text{KE}_{\text{new}} \gets \frac{1}{2}\cdot\frac{m_{\text{total}}}{2}\left[(u_{i_b}^{c,\text{new}})^2 + (u_{i_n}^{c,\text{new}})^2\right]$
+\State
+\State \textbf{Step 6: Adjust internal energy for total energy conservation}
+\State $\text{IE}_{\text{new}} \gets E_{\text{total}} - \text{KE}_{\text{new}}$
+\State $e_{\text{avg}} \gets \text{IE}_{\text{new}} / m_{\text{total}}$
+\State $e_{i_b} \gets e_{\text{avg}}$
+\State $e_{i_n} \gets e_{\text{avg}}$
+\State
+\State \textbf{Step 7: Update thermodynamic state}
+\State $\rho_{i_b} \gets \rho_{\text{avg}}$, \quad $\rho_{i_n} \gets \rho_{\text{avg}}$
+\State $p_{i_b}, c_{i_b} \gets \text{EOS}(\rho_{\text{avg}}, e_{\text{avg}})$
+\State $p_{i_n}, c_{i_n} \gets \text{EOS}(\rho_{\text{avg}}, e_{\text{avg}})$
+\end{algorithmic}
+\end{algorithm}
 
 \subsection{Conservation Verification}
 

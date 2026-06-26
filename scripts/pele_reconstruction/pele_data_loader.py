@@ -19,15 +19,17 @@ class PeleTrajectoryData:
     """Container for PeleC flame trajectory data."""
     time: np.ndarray                    # [s]
     flame_position: np.ndarray          # [m]
-    flame_velocity: np.ndarray          # [m/s] - flame front velocity
-    flame_gas_velocity: np.ndarray      # [m/s] - gas velocity at flame
+    flame_velocity: np.ndarray          # [m/s] - flame front velocity (S_f)
+    flame_gas_velocity: np.ndarray      # [m/s] - gas velocity at flame (u_uf)
 
     # Optional additional data
     pressure: Optional[np.ndarray] = None           # [Pa]
     temperature: Optional[np.ndarray] = None        # [K]
-    density: Optional[np.ndarray] = None            # [kg/m³]
+    density: Optional[np.ndarray] = None            # [kg/m³] - rho_u (unburned gas at flame)
     sound_speed: Optional[np.ndarray] = None        # [m/s]
+    burning_velocity: Optional[np.ndarray] = None   # [m/s] - flame burning velocity (S_c)
     burned_gas_velocity: Optional[np.ndarray] = None  # [m/s]
+    burned_gas_density: Optional[np.ndarray] = None   # [kg/m³] - rho_b (burned gas behind flame)
     gas_offset_data: Optional[np.ndarray] = None    # [m/s] - arbitrary column for gas velocity offset
 
     def __post_init__(self):
@@ -47,28 +49,23 @@ class PeleDataLoader:
     - Line 2: Column headers
     - Lines 3+: Data
 
-    Key columns (1-indexed):
-        1: Time
-        3: Flame Position [m]
-        4: Flame Gas Velocity [m/s]
-        5: Flame Thermodynamic Temperature [K]
-        6: Flame Thermodynamic Pressure [Pa]
-        7: Flame Thermodynamic Density [kg/m³]
-        8: Sound Speed [m/s]
-        14: Flame Velocity [m/s]
-        18: Burned Gas Gas Velocity [m/s]
+    Columns are identified by header names (not indices).
     """
 
-    # Column indices (0-indexed)
-    COL_TIME = 0
-    COL_FLAME_POSITION = 2
-    COL_FLAME_GAS_VELOCITY = 3
-    COL_FLAME_TEMPERATURE = 4
-    COL_FLAME_PRESSURE = 5
-    COL_FLAME_DENSITY = 6
-    COL_SOUND_SPEED = 7
-    COL_FLAME_VELOCITY = 13
-    COL_BURNED_GAS_VELOCITY = 17
+    # Mapping from internal field names to expected column header names
+    COLUMN_HEADERS = {
+        'time': 'Time',
+        'flame_position': 'Flame Position [m]',
+        'flame_gas_velocity': 'Flame Gas Velocity [m / s]',
+        'flame_temperature': 'Flame Thermodynamic Temperature [K]',
+        'flame_pressure': 'Flame Thermodynamic Pressure [kg / m / s^2]',
+        'flame_density': 'Flame Thermodynamic Density [kg / m^3]',  # rho_u - unburned gas density at flame
+        'sound_speed': 'Flame Thermodynamic Sound Speed',
+        'burning_velocity': 'Flame Burning Velocity [m / s]',  # S_c - flame burning velocity
+        'flame_velocity': 'Flame Velocity [m / s]',  # S_f - flame front velocity
+        'burned_gas_velocity': 'Burned Gas Gas Velocity [m / s]',
+        'burned_gas_density': 'Burned Gas Thermodynamic Density [kg / m^3]',  # rho_b - burned gas density behind flame
+    }
 
     # Time offsets for each data part (multi-part simulations)
     # Each part starts from t=0 in its file, but is actually a continuation
@@ -167,6 +164,21 @@ class PeleDataLoader:
         # Create mapping: header name -> 0-based index
         return {name.strip(): idx for idx, name in enumerate(headers)}
 
+    def _get_column_index(self, field_name: str) -> int:
+        """Get column index for a field using header mapping."""
+        if self._header_map is None:
+            raise ValueError("Header map not initialized - call _load_part first")
+
+        header_name = self.COLUMN_HEADERS.get(field_name)
+        if header_name is None:
+            raise ValueError(f"Unknown field name: {field_name}")
+
+        if header_name not in self._header_map:
+            available = list(self._header_map.keys())
+            raise ValueError(f"Column '{header_name}' not found for field '{field_name}'. Available: {available}")
+
+        return self._header_map[header_name]
+
     def _load_part(self, filepath: Path) -> dict:
         """Load a single part file."""
         # Read all lines
@@ -191,22 +203,23 @@ class PeleDataLoader:
 
         data = np.array(data)
 
+        # Extract columns using header-based lookup
         result = {
-            'time': data[:, self.COL_TIME],
-            'flame_position': data[:, self.COL_FLAME_POSITION],
-            'flame_velocity': data[:, self.COL_FLAME_VELOCITY],
-            'flame_gas_velocity': data[:, self.COL_FLAME_GAS_VELOCITY],
-            'pressure': data[:, self.COL_FLAME_PRESSURE],
-            'temperature': data[:, self.COL_FLAME_TEMPERATURE],
-            'density': data[:, self.COL_FLAME_DENSITY],
-            'sound_speed': data[:, self.COL_SOUND_SPEED],
-            'burned_gas_velocity': data[:, self.COL_BURNED_GAS_VELOCITY],
+            'time': data[:, self._get_column_index('time')],
+            'flame_position': data[:, self._get_column_index('flame_position')],
+            'flame_velocity': data[:, self._get_column_index('flame_velocity')],
+            'flame_gas_velocity': data[:, self._get_column_index('flame_gas_velocity')],
+            'pressure': data[:, self._get_column_index('flame_pressure')],
+            'temperature': data[:, self._get_column_index('flame_temperature')],
+            'density': data[:, self._get_column_index('flame_density')],
+            'sound_speed': data[:, self._get_column_index('sound_speed')],
+            'burning_velocity': data[:, self._get_column_index('burning_velocity')],
+            'burned_gas_velocity': data[:, self._get_column_index('burned_gas_velocity')],
+            'burned_gas_density': data[:, self._get_column_index('burned_gas_density')],
         }
 
         # Load gas offset column if specified
         if self.gas_offset_column is not None:
-            if self._header_map is None:
-                raise ValueError("Could not parse headers from data file")
             if self.gas_offset_column not in self._header_map:
                 available = list(self._header_map.keys())
                 raise ValueError(f"Column '{self.gas_offset_column}' not found. Available: {available}")
@@ -226,7 +239,9 @@ class PeleDataLoader:
         temperature = np.concatenate([p['temperature'] for p in parts])
         density = np.concatenate([p['density'] for p in parts])
         sound_speed = np.concatenate([p['sound_speed'] for p in parts])
+        burning_velocity = np.concatenate([p['burning_velocity'] for p in parts])
         burned_gas_velocity = np.concatenate([p['burned_gas_velocity'] for p in parts])
+        burned_gas_density = np.concatenate([p['burned_gas_density'] for p in parts])
 
         # Gas offset data (optional)
         gas_offset_data = None
@@ -249,7 +264,9 @@ class PeleDataLoader:
             temperature=temperature[final_idx],
             density=density[final_idx],
             sound_speed=sound_speed[final_idx],
+            burning_velocity=burning_velocity[final_idx],
             burned_gas_velocity=burned_gas_velocity[final_idx],
+            burned_gas_density=burned_gas_density[final_idx],
             gas_offset_data=gas_offset_data[final_idx] if gas_offset_data is not None else None,
         )
 
@@ -327,6 +344,14 @@ class PeleTrajectoryInterpolator:
         else:
             self._interp_burned_gas_velocity = None
 
+        if data.burned_gas_density is not None:
+            self._interp_burned_gas_density = interp1d(
+                data.time, data.burned_gas_density,
+                kind='linear', bounds_error=bounds_error, fill_value=fill_value
+            )
+        else:
+            self._interp_burned_gas_density = None
+
         if data.gas_offset_data is not None:
             self._interp_gas_offset = interp1d(
                 data.time, data.gas_offset_data,
@@ -385,6 +410,20 @@ class PeleTrajectoryInterpolator:
         if self._interp_burned_gas_velocity is None:
             return None
         return float(self._interp_burned_gas_velocity(t))
+
+    def burned_gas_density(self, t: float) -> Optional[float]:
+        """Interpolate burned gas density (rho_b) at time t."""
+        if self._interp_burned_gas_density is None:
+            return None
+        return float(self._interp_burned_gas_density(t))
+
+    def density(self, t: float) -> Optional[float]:
+        """Interpolate unburned gas density (rho_u) at flame front at time t."""
+        # The 'density' field in data is the flame thermodynamic density = rho_u
+        if self._data.density is None:
+            return None
+        # Use linear interpolation
+        return float(np.interp(t, self._data.time, self._data.density))
 
     def gas_offset(self, t: float) -> Optional[float]:
         """Interpolate gas velocity offset at time t."""

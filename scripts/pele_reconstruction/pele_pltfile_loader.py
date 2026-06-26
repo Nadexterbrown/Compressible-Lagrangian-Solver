@@ -24,6 +24,7 @@ PELE_VAR_MAP = {
     'Pressure': {'Name': 'pressure', 'Units': 'g / cm / s^2'},
     'Density': {'Name': 'density', 'Units': 'g / cm^3'},
     'Velocity': {'Name': 'x_velocity', 'Units': 'cm / s'},
+    'HeatRelease': {'Name': 'heatRelease', 'Units': 'g / cm / s^3'},  # erg/(cm^3*s) -> W/m^3
 }
 
 # Time offsets for multi-part PeleC simulations
@@ -102,6 +103,8 @@ class PeleSnapshot:
     p: np.ndarray            # [Pa] - pressure
     rho: np.ndarray          # [kg/m³] - density
     T: Optional[np.ndarray]  # [K] - temperature (may be None)
+    hrr: Optional[np.ndarray] = None  # [W/m³] - heat release rate (may be None)
+    path: str = ""           # Full path to pltfile directory
 
 
 def get_pltfile_number(pltfile_path: str) -> int:
@@ -206,12 +209,21 @@ def extract_pele_snapshot(
     except Exception:
         T_raw = None
 
+    # Heat release rate (may not exist in all pltfiles)
+    try:
+        hrr_raw = dr['boxlib', 'heatRelease'][ray_sort].to_value().flatten()
+    except Exception:
+        hrr_raw = None
+
     # Convert to SI
     x_si = UnitConverter.convert(x_raw, 'X')
     u_si = UnitConverter.convert(u_raw, 'Velocity')
     p_si = UnitConverter.convert(p_raw, 'Pressure')
     rho_si = UnitConverter.convert(rho_raw, 'Density')
     T_si = T_raw  # Already in K
+    # HRR: erg/(cm^3*s) = g/(cm*s^3) -> W/m^3 = kg/(m*s^3)
+    # Conversion: 1 erg/(cm^3*s) = 1e-7 J / (1e-6 m^3 * s) = 0.1 W/m^3
+    hrr_si = hrr_raw * 0.1 if hrr_raw is not None else None
 
     # Get time
     time_raw = float(ds.current_time.to_value())
@@ -229,6 +241,8 @@ def extract_pele_snapshot(
         p=p_si,
         rho=rho_si,
         T=T_si,
+        hrr=hrr_si,
+        path=pltfile_path,
     )
 
 

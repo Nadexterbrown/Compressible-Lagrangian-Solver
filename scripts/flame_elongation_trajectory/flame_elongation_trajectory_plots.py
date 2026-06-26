@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from lagrangian_solver.equations.eos import CanteraEOS
 from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.core.state import create_uniform_state
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver
 from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosityConfig
 from lagrangian_solver.boundary.piston import RiemannGhostPistonBC

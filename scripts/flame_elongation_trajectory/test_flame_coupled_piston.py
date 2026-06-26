@@ -39,7 +39,7 @@ from flame_coupled_piston_bc import FlameCoupledPistonBC, IterationResult
 
 # Import solver components
 from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 from lagrangian_solver.core.state import create_uniform_state
 from lagrangian_solver.equations.eos import CanteraEOS
 from lagrangian_solver.numerics.artificial_viscosity import ArtificialViscosityConfig

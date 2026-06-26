@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from lagrangian_solver.equations.eos import IdealGasEOS
 from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
 from lagrangian_solver.core.state import create_riemann_state
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver, RiemannState
 from lagrangian_solver.boundary.wall import SolidWallBC
 from lagrangian_solver.boundary.base import BoundarySide

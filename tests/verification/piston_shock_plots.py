@@ -31,6 +31,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 
+# Configure matplotlib for publication-quality plots
+plt.rcParams.update({
+    'font.family': 'serif',
+    'font.serif': ['Times New Roman'],
+    'font.size': 24,
+    'axes.labelsize': 24,
+    'axes.titlesize': 24,
+    'xtick.labelsize': 22,
+    'ytick.labelsize': 22,
+    'legend.fontsize': 20,
+    'figure.titlesize': 18,
+    'mathtext.fontset': 'stix',  # Use STIX fonts for math (compatible with Times)
+})
+
 # Add source to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
@@ -38,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from sdtoolbox.postshock import PostShock_fr
 
 from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 from lagrangian_solver.core.state import create_uniform_state
 from lagrangian_solver.equations.eos import CanteraEOS
 from lagrangian_solver.numerics.riemann import ExactRiemannSolver
@@ -234,11 +248,11 @@ def exact_piston_solution_sdtoolbox(
         t: Time [s]
         x_piston_0: Initial piston position [m]
         shock_state: Dictionary from compute_post_shock_state_sdtoolbox containing:
-            rho1, rho2, p1, p2, e1, e2, D, u_p
+            rho1, rho2, p1, p2, e1, e2, T1, T2, D, u_p
         ramp_time: Time to ramp piston velocity from 0 to u_p [s] (default 30e-6)
 
     Returns:
-        (rho, u, p, e, x_piston, x_shock) arrays/values
+        (rho, u, p, e, T, x_piston, x_shock) arrays/values
     """
     # Extract shock parameters
     rho1 = shock_state["rho1"]
@@ -247,6 +261,8 @@ def exact_piston_solution_sdtoolbox(
     p2 = shock_state["p2"]
     e1 = shock_state["e1"]
     e2 = shock_state["e2"]
+    T1 = shock_state["T1"]
+    T2 = shock_state["T2"]
     D = shock_state["D"]
     u_p = shock_state["u_p"]
 
@@ -283,6 +299,7 @@ def exact_piston_solution_sdtoolbox(
     u = np.zeros_like(x)
     p = np.full_like(x, p1)
     e = np.full_like(x, e1)
+    T = np.full_like(x, T1)
 
     # Post-shock region: between piston and shock
     # Note: During ramp, this is an approximation - the shock is still forming
@@ -292,8 +309,9 @@ def exact_piston_solution_sdtoolbox(
     u[post_shock] = u_piston_current  # Post-shock velocity = current piston velocity
     p[post_shock] = p2
     e[post_shock] = e2
+    T[post_shock] = T2
 
-    return rho, u, p, e, x_piston, x_shock
+    return rho, u, p, e, T, x_piston, x_shock
 
 
 # Legacy function for backward compatibility
@@ -424,9 +442,6 @@ def run_piston_test(
     grid_config = GridConfig(n_cells=n_cells, x_min=0.0, x_max=DOMAIN_LENGTH)
     grid = LagrangianGrid(grid_config)
 
-    # Create Riemann solver
-    riemann_solver = ExactRiemannSolver(eos, tol=1e-8, max_iter=100)
-
     # Left BC: Moving piston with velocity ramp
     bc_left = MovingPistonBC(
         side=BoundarySide.LEFT,
@@ -461,7 +476,6 @@ def run_piston_test(
     solver = LagrangianSolver(
         grid=grid,
         eos=eos,
-        riemann_solver=riemann_solver,
         bc_left=bc_left,
         bc_right=bc_right,
         config=solver_config,
@@ -555,7 +569,7 @@ def plot_piston_test(
 
     # Compute exact solution using SDToolbox shock state (with ramp)
     x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
-    rho_exact, u_exact, p_exact, e_exact, x_piston, x_shock = exact_piston_solution_sdtoolbox(
+    rho_exact, u_exact, p_exact, e_exact, T_exact, x_piston, x_shock = exact_piston_solution_sdtoolbox(
         x_exact, t_plot, 0.0, shock_state, ramp_time=ramp_time
     )
 
@@ -565,53 +579,32 @@ def plot_piston_test(
     u_num = 0.5 * (state.u[:-1] + state.u[1:])
     p_num = state.p
     e_num = state.e
+    T_num = state.T
 
-    # Create figure
+    # Create publication-quality figure
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-    # Build title using SDToolbox values
-    P_ratio = shock_state["p2"] / shock_state["p1"]
-    u_p = shock_state["u_p"]
-    D = shock_state["D"]
-
-    status_str = "FAILED" if failed else ""
-    title_lines = [f"Piston Shock Test: M_s = {test_num} ({test_data['name']}) {status_str}"]
-    title_lines.append(f"Air at STP, t = {t_plot*1e3:.3f} ms, N = {n_cells} cells, steps = {stats.n_steps}")
-    title_lines.append(f"P = {P_ratio:.2f}, u_piston = {u_p:.1f} m/s, D_shock = {D:.1f} m/s (SDToolbox)")
-
-    if dt_min:
-        min_dt_str = f"{stats.min_dt:.2e}" if stats.min_dt < float('inf') else "N/A"
-        title_lines.append(f"dt_min = {dt_min:.0e} (min_dt used: {min_dt_str})")
-    if failed:
-        err_str = error_msg[:60] + "..." if len(error_msg) > 60 else error_msg
-        title_lines.append(f"Error: {err_str}")
-
-    fig.suptitle("\n".join(title_lines), fontsize=12, fontweight="bold")
 
     # Plot variables
     variables = [
-        ("Density ρ", x_exact, rho_exact, x_num, rho_num, "[kg/m³]"),
-        ("Velocity u", x_exact, u_exact, x_num, u_num, "[m/s]"),
-        ("Pressure p", x_exact, p_exact, x_num, p_num, "[Pa]"),
-        ("Internal Energy e", x_exact, e_exact, x_num, e_num, "[J/kg]"),
+        ("Density", r"$\rho$", x_exact, rho_exact, x_num, rho_num, r"[kg/m$^3$]"),
+        ("Velocity", r"$u$", x_exact, u_exact, x_num, u_num, "[m/s]"),
+        ("Pressure", r"$p$", x_exact, p_exact, x_num, p_num, "[Pa]"),
+        ("Internal Energy", r"$e$", x_exact, e_exact, x_num, e_num, "[J/kg]"),
     ]
 
-    for idx, (name, x_ex, y_ex, x_n, y_n, unit) in enumerate(variables):
+    for idx, (name, symbol, x_ex, y_ex, x_n, y_n, unit) in enumerate(variables):
         ax = axes[idx // 2, idx % 2]
-        ax.plot(x_ex, y_ex, "b-", linewidth=2, label="Exact")
-        ax.plot(x_n, y_n, "ro", markersize=3, label="Numerical")
+        ax.plot(x_ex, y_ex, "k-", linewidth=1.5, label="Exact")
+        ax.plot(x_n, y_n, "r.", markersize=4, label="Numerical")
 
-        # Mark piston and shock positions
-        if not failed:
-            ax.axvline(x_piston, color="g", linestyle="--", alpha=0.5, label="Piston")
-            ax.axvline(x_shock, color="r", linestyle="--", alpha=0.5, label="Shock")
-
-        ax.set_xlabel("x [m]")
-        ax.set_ylabel(f"{name} {unit}")
-        ax.set_title(name)
-        ax.legend(loc="best")
+        ax.set_xlabel(r"$x$ [m]")
+        ax.set_ylabel(f"{symbol} {unit}")
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0, DOMAIN_LENGTH)
+
+        # Legend only in top-left subplot (idx=0)
+        if idx == 0:
+            ax.legend(loc="best")
 
     plt.tight_layout()
 
@@ -634,7 +627,181 @@ def plot_piston_test(
     )
     output_manager.add_result(result)
 
+    # Generate shock zoom plot and shock jump data (only if not failed and shock exists)
+    if not failed and x_shock > 0:
+        plot_piston_shock_zoom(
+            test_num, output_manager, x_num, rho_num, u_num, p_num, e_num,
+            x_exact, rho_exact, u_exact, p_exact, e_exact, x_shock, test_data
+        )
+        save_piston_shock_jump_data(
+            test_num, output_manager, x_shock, shock_state,
+            x_exact, rho_exact, u_exact, p_exact, e_exact, T_exact,
+            x_num, rho_num, u_num, p_num, e_num, T_num, test_data
+        )
+
     return failed
+
+
+def plot_piston_shock_zoom(
+    test_num: int,
+    output_manager: OutputManager,
+    x_num: np.ndarray,
+    rho_num: np.ndarray,
+    u_num: np.ndarray,
+    p_num: np.ndarray,
+    e_num: np.ndarray,
+    x_exact: np.ndarray,
+    rho_exact: np.ndarray,
+    u_exact: np.ndarray,
+    p_exact: np.ndarray,
+    e_exact: np.ndarray,
+    x_shock: float,
+    test_data: dict,
+):
+    """
+    Plot zoomed view around shock for piston test.
+    """
+    # Define zoom window around shock (shifted left 1 cm to fit legend in lower left)
+    zoom_width = 0.1  # 10 cm on each side
+    zoom_offset = 0.01  # 1 cm shift to the left (shock closer to right boundary)
+    x_min_zoom = max(0, x_shock - zoom_width - zoom_offset)
+    x_max_zoom = min(DOMAIN_LENGTH, x_shock + zoom_width - zoom_offset)
+
+    # Create zoomed figure
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    variables = [
+        ("Density", r"$\rho$", rho_exact, rho_num, r"[kg/m$^3$]"),
+        ("Velocity", r"$u$", u_exact, u_num, "[m/s]"),
+        ("Pressure", r"$p$", p_exact, p_num, "[Pa]"),
+        ("Internal Energy", r"$e$", e_exact, e_num, "[J/kg]"),
+    ]
+
+    for idx, (name, symbol, exact, num, unit) in enumerate(variables):
+        ax = axes[idx // 2, idx % 2]
+        ax.plot(x_exact, exact, "k-", linewidth=1.5, label="Exact")
+        ax.plot(x_num, num, "r.", markersize=6, label="Numerical")
+        ax.set_xlabel(r"$x$ [m]")
+        ax.set_ylabel(f"{symbol} {unit}")
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(x_min_zoom, x_max_zoom)
+
+        # Legend only in top-left subplot (lower left position)
+        if idx == 0:
+            ax.legend(loc="lower left")
+
+    plt.tight_layout()
+
+    # Save zoomed figure
+    filename = f"piston_shock_M{test_num}_zoom.png"
+    output_manager.save_figure(fig, filename)
+    print(f"    Shock zoom plot saved: {filename}")
+    plt.close(fig)
+
+
+def save_piston_shock_jump_data(
+    test_num: int,
+    output_manager: OutputManager,
+    x_shock: float,
+    shock_state: dict,
+    x_exact: np.ndarray,
+    rho_exact: np.ndarray,
+    u_exact: np.ndarray,
+    p_exact: np.ndarray,
+    e_exact: np.ndarray,
+    T_exact: np.ndarray,
+    x_num: np.ndarray,
+    rho_num: np.ndarray,
+    u_num: np.ndarray,
+    p_num: np.ndarray,
+    e_num: np.ndarray,
+    T_num: np.ndarray,
+    test_data: dict,
+):
+    """
+    Save shock jump values (pre-shock and post-shock) to text file.
+    """
+    # Sampling width from shock
+    width = 0.05
+
+    # Get exact shock jump values
+    def get_jump_values(x, var, shock_x):
+        pre_x = min(shock_x + width, np.max(x) - 0.01)
+        post_x = max(shock_x - width, np.min(x) + 0.01)
+        pre_val = np.interp(pre_x, x, var)
+        post_val = np.interp(post_x, x, var)
+        return pre_val, post_val
+
+    rho_pre_ex, rho_post_ex = get_jump_values(x_exact, rho_exact, x_shock)
+    u_pre_ex, u_post_ex = get_jump_values(x_exact, u_exact, x_shock)
+    p_pre_ex, p_post_ex = get_jump_values(x_exact, p_exact, x_shock)
+    e_pre_ex, e_post_ex = get_jump_values(x_exact, e_exact, x_shock)
+    T_pre_ex, T_post_ex = get_jump_values(x_exact, T_exact, x_shock)
+
+    # Get numerical shock jump values
+    rho_pre_num, rho_post_num = get_jump_values(x_num, rho_num, x_shock)
+    u_pre_num, u_post_num = get_jump_values(x_num, u_num, x_shock)
+    p_pre_num, p_post_num = get_jump_values(x_num, p_num, x_shock)
+    e_pre_num, e_post_num = get_jump_values(x_num, e_num, x_shock)
+    T_pre_num, T_post_num = get_jump_values(x_num, T_num, x_shock)
+
+    # Write to file
+    filename = f"piston_shock_M{test_num}_jump.txt"
+    filepath = output_manager.output_dir / filename
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(f"Piston Shock Test M_s = {test_num}: {test_data['name']}\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"Shock Location: x = {x_shock:.6f} m\n")
+        f.write(f"Shock Speed (SDToolbox): D = {shock_state['D']:.2f} m/s\n")
+        f.write(f"Piston Velocity: u_p = {shock_state['u_p']:.2f} m/s\n\n")
+
+        f.write("-" * 70 + "\n")
+        f.write("SHOCK JUMP VALUES\n")
+        f.write("-" * 70 + "\n\n")
+
+        f.write(f"{'Variable':<20} {'Pre-Shock':<15} {'Post-Shock':<15} {'Jump Ratio':<15}\n")
+        f.write("-" * 70 + "\n\n")
+
+        def safe_ratio(post, pre):
+            if abs(pre) < 1e-10:
+                return 0.0
+            return post / pre
+
+        f.write("EXACT SOLUTION (SDToolbox):\n")
+        f.write(f"{'Density (rho)':<20} {rho_pre_ex:<15.6f} {rho_post_ex:<15.6f} {safe_ratio(rho_post_ex, rho_pre_ex):<15.6f}\n")
+        f.write(f"{'Velocity (u)':<20} {u_pre_ex:<15.6f} {u_post_ex:<15.6f} {u_post_ex - u_pre_ex:<15.6f}\n")
+        f.write(f"{'Pressure (p)':<20} {p_pre_ex:<15.6f} {p_post_ex:<15.6f} {safe_ratio(p_post_ex, p_pre_ex):<15.6f}\n")
+        f.write(f"{'Internal Energy (e)':<20} {e_pre_ex:<15.6f} {e_post_ex:<15.6f} {safe_ratio(e_post_ex, e_pre_ex):<15.6f}\n")
+        f.write(f"{'Temperature (T)':<20} {T_pre_ex:<15.2f} {T_post_ex:<15.2f} {safe_ratio(T_post_ex, T_pre_ex):<15.6f}\n")
+        f.write("\n")
+
+        f.write("NUMERICAL SOLUTION:\n")
+        f.write(f"{'Density (rho)':<20} {rho_pre_num:<15.6f} {rho_post_num:<15.6f} {safe_ratio(rho_post_num, rho_pre_num):<15.6f}\n")
+        f.write(f"{'Velocity (u)':<20} {u_pre_num:<15.6f} {u_post_num:<15.6f} {u_post_num - u_pre_num:<15.6f}\n")
+        f.write(f"{'Pressure (p)':<20} {p_pre_num:<15.6f} {p_post_num:<15.6f} {safe_ratio(p_post_num, p_pre_num):<15.6f}\n")
+        f.write(f"{'Internal Energy (e)':<20} {e_pre_num:<15.6f} {e_post_num:<15.6f} {safe_ratio(e_post_num, e_pre_num):<15.6f}\n")
+        f.write(f"{'Temperature (T)':<20} {T_pre_num:<15.2f} {T_post_num:<15.2f} {safe_ratio(T_post_num, T_pre_num):<15.6f}\n")
+        f.write("\n")
+
+        f.write("-" * 70 + "\n")
+        f.write("PERCENT ERROR IN JUMP VALUES\n")
+        f.write("-" * 70 + "\n\n")
+
+        def pct_err(num, exact):
+            if abs(exact) < 1e-10:
+                return 0.0
+            return abs(num - exact) / abs(exact) * 100
+
+        f.write(f"{'Variable':<20} {'Pre-Shock Error':<20} {'Post-Shock Error':<20}\n")
+        f.write("-" * 70 + "\n")
+        f.write(f"{'Density (rho)':<20} {pct_err(rho_pre_num, rho_pre_ex):<20.4f}% {pct_err(rho_post_num, rho_post_ex):<20.4f}%\n")
+        f.write(f"{'Velocity (u)':<20} {pct_err(u_pre_num, u_pre_ex):<20.4f}% {pct_err(u_post_num, u_post_ex):<20.4f}%\n")
+        f.write(f"{'Pressure (p)':<20} {pct_err(p_pre_num, p_pre_ex):<20.4f}% {pct_err(p_post_num, p_post_ex):<20.4f}%\n")
+        f.write(f"{'Internal Energy (e)':<20} {pct_err(e_pre_num, e_pre_ex):<20.4f}% {pct_err(e_post_num, e_post_ex):<20.4f}%\n")
+        f.write(f"{'Temperature (T)':<20} {pct_err(T_pre_num, T_pre_ex):<20.4f}% {pct_err(T_post_num, T_post_ex):<20.4f}%\n")
+
+    print(f"    Shock jump data saved: {filename}")
 
 
 def create_summary_comparison(
@@ -670,7 +837,7 @@ def create_summary_comparison(
 
         # Compute exact solution using SDToolbox (with ramp)
         x_exact = np.linspace(0, DOMAIN_LENGTH, 500)
-        rho_exact, u_exact, p_exact, e_exact, _, _ = exact_piston_solution_sdtoolbox(
+        rho_exact, u_exact, p_exact, e_exact, _, _, _ = exact_piston_solution_sdtoolbox(
             x_exact, t_plot, 0.0, shock_state, ramp_time=ramp_time
         )
 
