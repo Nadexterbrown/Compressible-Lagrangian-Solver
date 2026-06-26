@@ -476,6 +476,7 @@ def run_reconstruction(
     gas_velocity_offset: float = None,
     use_gas_velocity_data: bool = False,
     gas_offset_data: str = None,
+    gas_velocity_density_ratio: bool = False,
     gas_velocity_min: float = None,
     n_records: int = 1000,
     output_dir: str = None,
@@ -522,6 +523,11 @@ def run_reconstruction(
         When specified, gas velocity = piston velocity - offset_data(t).
         Uses MovingPorousPistonBC with computed gas velocity function.
         Cannot be used together with gas_velocity_offset or use_gas_velocity_data.
+    gas_velocity_density_ratio : bool, optional
+        If True, compute gas velocity from density ratio formula:
+        u_g = ((rho_u/rho_b - 1) / (rho_u/rho_b)) * U_f
+        where rho_u is unburned density, rho_b is burned density, U_f is flame velocity.
+        Cannot be used together with other gas velocity options.
     gas_velocity_min : float, optional
         Minimum allowed gas velocity [m/s] when using porous BC.
         Gas velocity is clamped to this value. Default None = no clamping.
@@ -586,6 +592,8 @@ def run_reconstruction(
             bc_subdir = "porous_data"
         elif gas_offset_data is not None:
             bc_subdir = "porous_offset_data"
+        elif gas_velocity_density_ratio:
+            bc_subdir = "porous_density_ratio"
         elif gas_velocity_offset is not None:
             bc_subdir = "porous"
         else:
@@ -596,7 +604,7 @@ def run_reconstruction(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create EOS
-    mech_path = Path(__file__).parent.parent / "flame_elongation_trajectory" / "cantera_data" / "Li-Dryer-H2-mechanism.yaml"
+    mech_path = Path(__file__).parent.parent.parent / "src" / "chemical_mechanisms" / "LiDryer.yaml"
     print(f"\nCreating EOS with mechanism: {mech_path}")
     eos = CanteraEOS(str(mech_path))
     eos.set_mixture(INPUT_PARAMS_CONFIG['Fuel'], INPUT_PARAMS_CONFIG['Oxidizer'], INPUT_PARAMS_CONFIG['Phi'])
@@ -610,10 +618,12 @@ def run_reconstruction(
     state, rho_init, c_init = create_initial_state(grid, eos, INPUT_PARAMS_CONFIG['T'], INPUT_PARAMS_CONFIG['P'])
 
     # Determine if using porous BC
-    porous_options = [gas_velocity_offset is not None, use_gas_velocity_data, gas_offset_data is not None]
+    porous_options = [gas_velocity_offset is not None, use_gas_velocity_data,
+                      gas_offset_data is not None, gas_velocity_density_ratio]
     if sum(porous_options) > 1:
         raise ValueError("Cannot use multiple gas velocity options. "
-                         "Choose one of: --gas-velocity-offset, --use-gas-velocity-data, or --gas-offset-data.")
+                         "Choose one of: --gas-velocity-offset, --use-gas-velocity-data, "
+                         "--gas-offset-data, or --gas-velocity-density-ratio.")
     use_porous = any(porous_options)
 
     print(f"\nSimulation setup:")
@@ -637,6 +647,13 @@ def run_reconstruction(
             u_gas_min = data.flame_velocity.min() - data.gas_offset_data.max()
             u_gas_max = data.flame_velocity.max() - data.gas_offset_data.min()
             print(f"  Expected gas velocity range: [{u_gas_min:.1f}, {u_gas_max:.1f}] m/s")
+        elif gas_velocity_density_ratio:
+            print(f"  BC Type: POROUS (u_gas = ((rho_u/rho_b - 1)/(rho_u/rho_b)) * U_f)")
+            # Compute expected gas velocity range using density ratio formula
+            sigma = data.density / data.burned_gas_density  # rho_u / rho_b
+            u_gas_computed = ((sigma - 1.0) / sigma) * data.flame_velocity
+            print(f"  Density ratio (rho_u/rho_b) range: [{sigma.min():.2f}, {sigma.max():.2f}]")
+            print(f"  Expected gas velocity range: [{u_gas_computed.min():.1f}, {u_gas_computed.max():.1f}] m/s")
         else:
             print(f"  BC Type: POROUS (gas_velocity_offset = {gas_velocity_offset:+.1f} m/s)")
         if gas_velocity_min is not None:
@@ -670,6 +687,24 @@ def run_reconstruction(
                 side=BoundarySide.LEFT, eos=eos,
                 trajectory=trajectory,
                 gas_velocity_func=gas_velocity_from_offset,
+                gas_velocity_min=gas_velocity_min,
+                thermal_bc=ThermalBCType.ADIABATIC,
+            )
+        elif gas_velocity_density_ratio:
+            # Gas velocity from density ratio formula:
+            # u_g = ((rho_u/rho_b - 1) / (rho_u/rho_b)) * U_f
+            # This is derived from mass conservation across the flame front
+            def gas_velocity_from_density_ratio(t: float) -> float:
+                rho_u = trajectory.density(t)           # unburned gas density at flame
+                rho_b = trajectory.burned_gas_density(t)  # burned gas density behind flame
+                U_f = trajectory.velocity(t)            # flame velocity
+                sigma = rho_u / rho_b                   # density ratio
+                return ((sigma - 1.0) / sigma) * U_f
+
+            left_bc = MovingPorousPistonBC(
+                side=BoundarySide.LEFT, eos=eos,
+                trajectory=trajectory,
+                gas_velocity_func=gas_velocity_from_density_ratio,
                 gas_velocity_min=gas_velocity_min,
                 thermal_bc=ThermalBCType.ADIABATIC,
             )
@@ -728,6 +763,8 @@ def run_reconstruction(
         bc_type = "porous_data"
     elif gas_offset_data is not None:
         bc_type = "porous_offset_data"
+    elif gas_velocity_density_ratio:
+        bc_type = "porous_density_ratio"
     elif gas_velocity_offset is not None:
         bc_type = "porous_offset"
     else:
@@ -801,6 +838,7 @@ def run_reconstruction(
         "gas_velocity_offset": gas_velocity_offset,
         "use_gas_velocity_data": use_gas_velocity_data,
         "gas_offset_data": gas_offset_data,
+        "gas_velocity_density_ratio": gas_velocity_density_ratio,
         "gas_velocity_min": gas_velocity_min,
         "data_source": str(data_dir),
         "n_data_points": len(data.time),
@@ -884,6 +922,12 @@ def main():
                         help="Column header name for gas velocity offset (e.g., 'Flame Burning Velocity [m / s]'). "
                              "Gas velocity = piston velocity - offset_data(t). "
                              "Cannot be used together with --gas-velocity-offset or --use-gas-velocity-data.")
+    parser.add_argument("--gas-velocity-density-ratio", action="store_true",
+                        help="Compute gas velocity from density ratio formula: "
+                             "u_g = ((rho_u/rho_b - 1)/(rho_u/rho_b)) * U_f. "
+                             "Uses unburned density (rho_u), burned density (rho_b), "
+                             "and flame velocity (U_f) from trajectory data. "
+                             "Cannot be used together with other gas velocity options.")
     parser.add_argument("--gas-velocity-min", type=float, default=None,
                         help="Minimum allowed gas velocity [m/s] for porous BC. Use 0 to prevent negative "
                              "gas velocities. (default: None, no clamping)")
@@ -907,6 +951,7 @@ def main():
         gas_velocity_offset=args.gas_velocity_offset,
         use_gas_velocity_data=args.use_gas_velocity_data,
         gas_offset_data=args.gas_offset_data,
+        gas_velocity_density_ratio=args.gas_velocity_density_ratio,
         gas_velocity_min=args.gas_velocity_min,
         n_records=args.n_records,
         output_dir=args.output_dir,
