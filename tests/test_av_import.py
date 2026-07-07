@@ -1,7 +1,7 @@
 """Quick test to verify artificial viscosity implementation."""
 import numpy as np
 
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 from lagrangian_solver.numerics.artificial_viscosity import (
     ArtificialViscosity,
     ArtificialViscosityConfig,

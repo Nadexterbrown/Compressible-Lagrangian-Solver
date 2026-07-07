@@ -62,7 +62,9 @@ COMMON_PARAMS = {
     'velocity_scale': 1.0,
     'velocity_offset': 0.0,
     'velocity_min': None,
-    'dt_min': 1e-8,  # Minimum timestep [s] (10 ns) to prevent stalling at high compression
+    # NOTE: dt_min was removed. Flooring dt above the porous drainage guard made
+    # step_forward silently integrate a smaller dt than the script clock advanced
+    # by, corrupting all recorded timelines (docs/DT_CLAMP_REVERT_PLAN.md).
 }
 
 # Mixture configurations per fuel type
@@ -187,7 +189,6 @@ def run_single_case(case: dict, rank: int) -> dict:
             mechanism=case['mechanism'],
             # Enable density ratio BC
             use_density_ratio_bc=True,
-            dt_min=case['dt_min'],
         )
 
         result['duration'] = time.time() - start_time

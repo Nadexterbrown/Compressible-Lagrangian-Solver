@@ -19,6 +19,7 @@ Usage:
 
 import sys
 import json
+import time
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -462,22 +463,46 @@ def save_snapshots(saved_data: Dict, config: Dict, output_dir: str, snapshot_int
 
 
 def plot_velocity_comparison(saved_data: Dict, traj_data, output_file: str):
-    """Plot velocity comparison between 1D solver and trajectory data."""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """Validate the ACTUAL piston node motion against the experimental trajectory.
 
-    times_ms = saved_data['t'] * 1e3
+    The previous version plotted saved u_piston = trajectory.velocity(t) against
+    the experimental flame velocity - a tautology that matches by construction
+    no matter what the grid does (it hid the dt-clamp clock desync entirely).
+    This version compares the recorded node position x[:,0] and its numerical
+    derivative against the trajectory, so any divergence between the grid and
+    the prescribed motion is visible.
+    """
+    times = np.asarray(saved_data['t'])
+    # Prefer the explicit piston-node series (well-defined under cell
+    # absorption, where x[:,0] becomes NaN padding); fall back for old data.
+    if 'x_piston' in saved_data and len(saved_data['x_piston']) == len(times):
+        x_node = np.asarray(saved_data['x_piston'])
+    else:
+        x_node = np.asarray(saved_data['x'])[:, 0]
 
-    # Plot piston velocity (grid motion) - should match flame velocity
-    ax.plot(times_ms, saved_data['u_piston'], 'b-', lw=2, label='Piston velocity (1D solver)')
+    fig, (ax_pos, ax_vel) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
 
-    # Plot trajectory flame velocity
-    ax.plot(traj_data.time * 1e3, traj_data.flame_velocity, 'r--', lw=1.5, alpha=0.7, label='Experimental flame velocity')
+    # --- Position: actual node vs experimental trajectory ---
+    ax_pos.plot(times * 1e3, x_node * 1e3, 'b-', lw=2, label='Piston node position (1D solver, x[:,0])')
+    ax_pos.plot(traj_data.time * 1e3, traj_data.flame_position * 1e3, 'r--', lw=1.5, alpha=0.7,
+                label='Experimental flame position')
+    ax_pos.set_ylabel('Position [mm]')
+    ax_pos.set_title('Piston Node vs Experimental Trajectory')
+    ax_pos.legend()
+    ax_pos.grid(True, alpha=0.3)
 
-    ax.set_xlabel('Time [ms]')
-    ax.set_ylabel('Velocity [m/s]')
-    ax.set_title('Velocity Comparison')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # --- Velocity: derivative of actual node motion vs experiment ---
+    if len(times) > 2:
+        u_node = np.gradient(x_node, times)
+        ax_vel.plot(times * 1e3, u_node, 'b-', lw=1.5, label='Piston node velocity (d/dt of x[:,0])')
+    ax_vel.plot(times * 1e3, saved_data['u_piston'], 'g-', lw=1, alpha=0.6,
+                label='Prescribed piston velocity (recorded)')
+    ax_vel.plot(traj_data.time * 1e3, traj_data.flame_velocity, 'r--', lw=1.5, alpha=0.7,
+                label='Experimental flame velocity')
+    ax_vel.set_xlabel('Time [ms]')
+    ax_vel.set_ylabel('Velocity [m/s]')
+    ax_vel.legend()
+    ax_vel.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -556,9 +581,18 @@ def run_reconstruction(
         Gas velocity = ((sigma-1)/sigma) * U_f, where sigma = rho_u/rho_b.
         rho_u from simulation state (cell 0), rho_b from Cantera equilibrate('HP').
     dt_min : float, optional
-        Minimum timestep [s]. If CFL requires smaller dt, this value is used instead.
-        WARNING: May violate CFL and cause numerical instability at high compressions.
+        REMOVED. Passing a value raises ValueError. Flooring dt above the porous
+        drainage guard corrupts the recorded timeline (docs/DT_CLAMP_REVERT_PLAN.md).
     """
+    if dt_min is not None:
+        raise ValueError(
+            "dt_min is no longer supported: flooring the requested timestep above the "
+            "porous drainage guard makes step_forward silently integrate a smaller dt "
+            "than the script clock advances by, corrupting the recorded timeline "
+            "(see docs/DT_CLAMP_REVERT_PLAN.md). Fix the underlying dt collapse instead "
+            "(docs/PISTON_CELL_COLLAPSE_FIX_PLAN.md Phase 2)."
+        )
+
     print("=" * 70)
     print("EXPERIMENT RECONSTRUCTION SIMULATION")
     print("=" * 70)
@@ -638,8 +672,6 @@ def run_reconstruction(
     print(f"  Initial: rho={rho_init:.6f} kg/m³, c={c_init:.1f} m/s")
     print(f"  Initial: T={conditions['T']} K, P={conditions['P']/1e5:.2f} bar")
     print(f"  AV: c_linear={av_linear}, c_quad={av_quad}")
-    if dt_min is not None:
-        print(f"  dt_min: {dt_min*1e9:.1f} ns (WARNING: may violate CFL)")
     if velocity_scale != 1.0:
         print(f"  Velocity scale: {velocity_scale}")
     if velocity_offset != 0.0:
@@ -706,7 +738,7 @@ def run_reconstruction(
     right_bc = OpenBC(side=BoundarySide.RIGHT, eos=eos, p_external=conditions['P'])
 
     # Create solver
-    solver_config = SolverConfig(cfl=cfl, av_linear=av_linear, av_quad=av_quad, av_enabled=True, dt_min=dt_min)
+    solver_config = SolverConfig(cfl=cfl, av_linear=av_linear, av_quad=av_quad, av_enabled=True)
     solver = LagrangianSolver(grid=grid, eos=eos, bc_left=left_bc, bc_right=right_bc, config=solver_config)
     solver.set_initial_condition(state)
 
@@ -718,9 +750,23 @@ def run_reconstruction(
     saved_data = {
         't': [], 'x': [], 'rho': [], 'u': [], 'p': [], 'e': [], 'T': [], 's': [],
         'u_piston': [],  # Piston velocity (grid motion)
+        'x_piston': [],  # Actual piston node position (unambiguous under absorption)
+        'n_active': [],  # Active cell count (decreases when boundary cells retire)
         'T_b': [],       # Burned gas equilibrium temperature (density ratio BC only)
         'rho_b': [],     # Burned gas equilibrium density (density ratio BC only)
     }
+
+    # Boundary-cell absorption retires cells at the piston face, shrinking the
+    # arrays. Left-pad records with NaN to the initial size so stacked npz
+    # arrays stay rectangular and column j keeps meaning "original cell j".
+    n_faces_init = n_cells + 1
+
+    def _pad_left(arr, full):
+        if len(arr) == full:
+            return arr
+        out = np.full(full, np.nan)
+        out[full - len(arr):] = arr
+        return out
 
     # Recording interval - time-based to target ~1000 snapshots
     # Record every dt_record seconds of simulation time
@@ -755,17 +801,15 @@ def run_reconstruction(
 
     step = 0
     t = 0.0
+    wall_start = time.time()
 
     while t < t_end:
         current_state = solver.state
 
-        c = eos.sound_speed(current_state.rho, current_state.p)
-        dt_cell = grid.dx / (c + np.abs(current_state.u[:-1] + current_state.u[1:]) / 2)
-        dt = cfl * np.min(dt_cell)
-
-        # Enforce minimum timestep
-        if dt_min is not None and dt < dt_min:
-            dt = dt_min
+        # Ask the solver for its dt (CFL + all internal constraints) instead
+        # of duplicating the CFL formula here - a locally computed dt can
+        # disagree with the solver's constraints and desync bookkeeping.
+        dt = solver.suggest_dt()
 
         if t + dt > t_end:
             dt = t_end - t
@@ -773,14 +817,16 @@ def run_reconstruction(
         # Record state (time-based)
         if t >= t_next_record:
             saved_data['t'].append(t)
-            saved_data['x'].append(grid.x.copy())
-            saved_data['rho'].append(current_state.rho.copy())
-            saved_data['u'].append(current_state.u.copy())
-            saved_data['p'].append(current_state.p.copy())
-            saved_data['e'].append(current_state.e.copy())
-            saved_data['T'].append(current_state.T.copy())
-            saved_data['s'].append(current_state.s.copy())
+            saved_data['x'].append(_pad_left(grid.x.copy(), n_faces_init))
+            saved_data['rho'].append(_pad_left(current_state.rho.copy(), n_cells))
+            saved_data['u'].append(_pad_left(current_state.u.copy(), n_faces_init))
+            saved_data['p'].append(_pad_left(current_state.p.copy(), n_cells))
+            saved_data['e'].append(_pad_left(current_state.e.copy(), n_cells))
+            saved_data['T'].append(_pad_left(current_state.T.copy(), n_cells))
+            saved_data['s'].append(_pad_left(current_state.s.copy(), n_cells))
             saved_data['u_piston'].append(left_bc.get_piston_velocity(t))
+            saved_data['x_piston'].append(grid.x[0])
+            saved_data['n_active'].append(grid.n_cells)
             # Burned gas equilibrium state (density ratio BC only)
             if use_density_ratio_bc:
                 saved_data['T_b'].append(cached_state['T_b'])
@@ -797,7 +843,10 @@ def run_reconstruction(
             flush_chunk()  # Save what we have before breaking
             break
 
-        t += dt
+        # Single source of truth: the solver's clock advances by the dt it
+        # actually integrated (which may be smaller than requested if a BC
+        # constraint clamped it). Never keep a parallel script clock.
+        t = solver.time
         step += 1
 
         # Periodic flush to disk
@@ -812,12 +861,17 @@ def run_reconstruction(
     # Flush any remaining data
     flush_chunk()
 
-    print(f"\nCompleted: {step} steps, {chunk_count} chunks written")
+    wall_time = time.time() - wall_start
+    stats = solver.statistics
+    print(f"\nCompleted: {step} steps, {chunk_count} chunks written ({wall_time:.1f} s)")
+    if stats.clamped_steps > 0:
+        print(f"  WARNING: {stats.clamped_steps} steps had the requested dt reduced by an "
+              f"internal constraint (timeline is honest via solver.time, but investigate).")
 
     # Consolidate chunks into single saved_data dict
     print(f"\nConsolidating {chunk_count} chunks...")
     chunk_files = sorted(chunk_dir.glob("chunk_*.npz"))
-    consolidated = {k: [] for k in ['t', 'x', 'rho', 'u', 'p', 'e', 'T', 's', 'u_piston', 'T_b', 'rho_b']}
+    consolidated = {k: [] for k in saved_data.keys()}
     for chunk_file in chunk_files:
         chunk = np.load(chunk_file, allow_pickle=True)
         for k in consolidated:
@@ -859,6 +913,13 @@ def run_reconstruction(
         "T_init": conditions['T'],
         "p_init": conditions['P'],
         "use_density_ratio_bc": use_density_ratio_bc,
+        # Run diagnostics (docs/DT_CLAMP_REVERT_PLAN.md item 7)
+        "mass_leaked": float(getattr(left_bc, 'mass_leaked', 0.0)),
+        "clamped_steps": int(stats.clamped_steps),
+        "min_dt": float(stats.min_dt) if np.isfinite(stats.min_dt) else None,
+        "max_dt": float(stats.max_dt),
+        "solver_final_time": float(solver.time),
+        "wall_time_s": float(wall_time),
     }
 
     # Save outputs
@@ -919,7 +980,8 @@ def main():
     parser.add_argument("--use-density-ratio-bc", action="store_true",
                         help="Use porous BC with gas velocity from density ratio")
     parser.add_argument("--dt-min", type=float, default=None,
-                        help="Minimum timestep [s] (e.g., 1e-9 for 1 ns). WARNING: May violate CFL.")
+                        help="REMOVED (raises an error). Flooring dt corrupted recorded timelines; "
+                             "see docs/DT_CLAMP_REVERT_PLAN.md.")
 
     args = parser.parse_args()
 

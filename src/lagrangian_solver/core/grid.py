@@ -405,6 +405,56 @@ class LagrangianGrid:
                 f"Right boundary cell mass became non-positive: {self._dm[-1]}"
             )
 
+    def remove_boundary_cell(self, side: "BoundarySide") -> None:
+        """
+        Remove the boundary cell, folding its mass into its neighbor.
+
+        Used by porous piston BCs when the boundary cell has drained below a
+        threshold: instead of keeping an ever-shrinking cell alive (which
+        collapses the global CFL time step), the cell is retired and the
+        domain boundary face becomes the neighbor's outer face. The cell
+        count decreases by one.
+
+        The caller is responsible for the conservative remap of the flow
+        state (momentum/energy); this method only updates grid geometry and
+        mass bookkeeping. Mass is conserved exactly: dm_neighbor += dm_boundary.
+
+        Reference: cell absorption at piston faces follows GDTk L1D
+        (Jacobs et al., https://gdtk.uqcloud.net).
+
+        Args:
+            side: Which boundary cell to remove (LEFT or RIGHT)
+
+        Raises:
+            ValueError: If the grid has fewer than 2 cells
+        """
+        from lagrangian_solver.boundary.base import BoundarySide
+
+        if self._n_cells < 2:
+            raise ValueError(
+                f"Cannot remove boundary cell: grid has {self._n_cells} cell(s)"
+            )
+
+        if side == BoundarySide.LEFT:
+            dm_absorbed = self._dm[0]
+            self._dm = self._dm[1:].copy()
+            self._dm[0] += dm_absorbed
+            # Drop interior face 1; face 0 (the piston face) remains the boundary
+            self._x = np.delete(self._x, 1)
+        else:
+            dm_absorbed = self._dm[-1]
+            self._dm = self._dm[:-1].copy()
+            self._dm[-1] += dm_absorbed
+            # Drop the interior face just inside the right boundary
+            self._x = np.delete(self._x, -2)
+
+        self._n_cells -= 1
+        self._n_faces -= 1
+
+        # Rebuild cumulative mass from cell masses
+        self._m = np.zeros(self._n_faces)
+        self._m[1:] = np.cumsum(self._dm)
+
     @classmethod
     def from_dict(cls, data: dict) -> "LagrangianGrid":
         """Create grid from dictionary data."""

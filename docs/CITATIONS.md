@@ -24,6 +24,25 @@ Each citation should include:
 
 ## References
 
+### [GDTk-L1D] - Boundary-Cell Absorption at Piston Faces
+
+**Reference**: Jacobs, P.A., Gollan, R.J., et al. *GDTk: The Gas Dynamics Toolkit* — L1D Lagrangian 1D flow solver. The University of Queensland. https://gdtk.uqcloud.net
+
+**Used in**:
+- `src/lagrangian_solver/core/grid.py` — `LagrangianGrid.remove_boundary_cell` (cell retirement with mass folded into the neighbor)
+- `src/lagrangian_solver/boundary/piston.py` — `MovingPorousPistonBC._absorb_boundary_cell` and the mass-based trigger in `check_merge_split`
+
+**Description**: True cell-count reduction for drained piston-adjacent cells. When the porous piston drains its boundary cell below a mass threshold (dm[0] < 0.5·dm[1]), the cell is retired: its remaining mass, momentum, and energy are conservatively absorbed into the neighbor and the interior face is removed. This replaces the previous pairwise merge-split (which never reduced the cell count and collapsed the global CFL timestep to sub-nanosecond values — see `docs/PISTON_CELL_COLLAPSE_FIX_PLAN.md`). The conservative remap math (mass and total energy exact; momentum approximate because both surviving faces are physically constrained) follows [Benson1992].
+
+### [Benson1992] - Conservative Remapping
+
+**Reference**: Benson, D.J. (1992). Computational methods in Lagrangian and Eulerian hydrocodes. *Computer Methods in Applied Mechanics and Engineering*, 99(2-3), 235-394. DOI: 10.1016/0045-7825(92)90042-I
+
+**Used in**:
+- `src/lagrangian_solver/boundary/piston.py` — `_conservative_merge_split` (growth direction) and `_absorb_boundary_cell` (drainage direction)
+
+**Description**: ALE-style conservative remapping principles used when boundary cells are merged, split, or absorbed: gather conserved quantities (mass, momentum, total energy), redistribute geometrically, and adjust internal energy for the kinetic-energy change before re-evaluating the thermodynamic state through the EOS.
+
 ### [Toro2009] - Primary Reference for Numerical Schemes
 
 **Reference**: Toro, E.F. (2009). *Riemann Solvers and Numerical Methods for Fluid Dynamics: A Practical Introduction* (3rd ed.). Springer-Verlag Berlin Heidelberg. ISBN: 978-3-540-25202-3. DOI: 10.1007/b79761

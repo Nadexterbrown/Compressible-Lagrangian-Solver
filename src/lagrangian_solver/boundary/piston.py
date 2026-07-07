@@ -1561,14 +1561,20 @@ class MovingPorousPistonBC(BoundaryCondition):
         self._mass_leaked = 0.0
         self._initial_boundary_mass = None
 
-        # Merge-split thresholds (same as PorousGhostPistonBC)
-        self._merge_low = 0.5   # merge when ratio < 50% (more aggressive)
-        self._merge_high = 2.0  # merge when ratio > 200% (more aggressive)
+        # Merge-split threshold for the growth direction (boundary cell
+        # gaining mass when u_p < u_g): equalize with neighbor when the
+        # boundary cell exceeds this mass ratio.
+        self._merge_high = 2.0
 
-        # Minimum absolute cell size - forces merge-split regardless of ratio
-        # Set based on initial grid spacing to prevent CFL collapse
-        self._min_cell_size = None  # Will be set on first call to check_merge_split
-        self._min_cell_size_factor = 0.1  # Trigger when dx < 10% of initial average dx
+        # Absorption threshold for the drainage direction: retire the
+        # boundary cell into its neighbor when its mass falls below this
+        # fraction of the neighbor's mass. Mass-based (not width-based) so
+        # ordinary Lagrangian compression never triggers it.
+        self._absorb_threshold = 0.5
+
+        # Cell-count floor: refuse to absorb below 10% of the initial count
+        # (a run that drains that much of its grid has a setup problem).
+        self._initial_n_cells = None
 
     @property
     def trajectory(self) -> TrajectoryInterpolator:
@@ -1885,101 +1891,168 @@ class MovingPorousPistonBC(BoundaryCondition):
         state: FlowState,
     ) -> bool:
         """
-        Check if boundary cells need recursive merge-split.
+        Manage the boundary cell as it drains (absorb) or grows (merge-split).
 
-        Triggers merge-split based on THREE criteria:
-        1. Mass ratio: if boundary cell mass is too small/large vs neighbor
-        2. Volume ratio: if boundary cell volume (dx) is too small vs neighbor
-        3. Absolute minimum: if cell volume drops below absolute threshold
+        Drainage direction (u_p > u_g, boundary cell losing mass): when the
+        boundary cell mass falls below ``absorb_threshold`` x neighbor mass,
+        the cell is RETIRED: its contents are absorbed conservatively into
+        the neighbor and the cell count decreases by one (as in GDTk L1D).
+        This replaces the previous pairwise merge-split, which kept an
+        ever-shrinking cell pair alive and collapsed the global CFL dt to
+        sub-nanosecond values (docs/PISTON_CELL_COLLAPSE_FIX_PLAN.md).
 
-        The absolute minimum check prevents CFL collapse even when ratios
-        are acceptable (e.g., when ALL cells are shrinking uniformly).
+        The trigger is MASS-based, not width-based: ordinary Lagrangian
+        compression shrinks dx at constant mass and must not retire cells.
 
-        Uses RECURSIVE merge-split: after merging cells 0+1, also check if
-        cell 1 needs to merge with cell 2, and so on.
+        Growth direction (u_p < u_g, boundary cell gaining mass): the
+        existing conservative pairwise merge-split equalizes the boundary
+        cell with its neighbor when it exceeds ``merge_high`` x its mass.
 
         Args:
-            grid: Lagrangian grid
-            state: Current flow state
+            grid: Lagrangian grid (modified in place)
+            state: Current flow state (modified in place)
 
         Returns:
-            True if any merge-split was performed
+            True if the grid or state was modified
         """
-        # Initialize minimum cell size on first call
-        if self._min_cell_size is None:
-            # Use average initial cell size as reference
-            domain_length = state.x[-1] - state.x[0]
-            avg_dx = domain_length / grid.n_cells
-            self._min_cell_size = self._min_cell_size_factor * avg_dx
+        if self._initial_n_cells is None:
+            self._initial_n_cells = grid.n_cells
+        min_cells = max(2, int(0.1 * self._initial_n_cells))
 
-        any_merged = False
+        any_changed = False
 
+        # --- Drainage direction: absorb the boundary cell into its neighbor ---
+        while True:
+            if self._side == BoundarySide.LEFT:
+                m_boundary, m_neighbor = grid.dm[0], grid.dm[1]
+            else:
+                m_boundary, m_neighbor = grid.dm[-1], grid.dm[-2]
+
+            if m_neighbor < 1e-15 or m_boundary >= self._absorb_threshold * m_neighbor:
+                break
+
+            if grid.n_cells <= min_cells:
+                raise RuntimeError(
+                    f"Porous boundary drained the grid to {grid.n_cells} cells "
+                    f"(floor {min_cells} of initial {self._initial_n_cells}); "
+                    f"check the case setup (domain length, gas velocity model)."
+                )
+
+            self._absorb_boundary_cell(grid, state)
+            any_changed = True
+
+        # --- Growth direction: equalize with neighbor via merge-split ---
         if self._side == BoundarySide.LEFT:
-            # Start from boundary and work inward
-            # Allow redistribution up to half the grid
-            idx = 0
-            max_idx = min(grid.n_cells - 2, grid.n_cells // 2)
-            while idx < max_idx:
-                neighbor_idx = idx + 1
-                if grid.dm[neighbor_idx] < 1e-15:
-                    break  # Avoid division by zero
-
-                # Check mass ratio
-                mass_ratio = grid.dm[idx] / grid.dm[neighbor_idx]
-                needs_merge_mass = mass_ratio < self._merge_low or mass_ratio > self._merge_high
-
-                # Check volume ratio (CRITICAL for CFL stability)
-                dx_idx = state.x[idx + 1] - state.x[idx]
-                dx_neighbor = state.x[neighbor_idx + 1] - state.x[neighbor_idx]
-                if dx_neighbor > 1e-15:
-                    vol_ratio = dx_idx / dx_neighbor
-                    needs_merge_vol = vol_ratio < self._merge_low or vol_ratio > self._merge_high
-                else:
-                    needs_merge_vol = True
-
-                # Check absolute minimum cell size
-                needs_merge_abs = dx_idx < self._min_cell_size
-
-                if needs_merge_mass or needs_merge_vol or needs_merge_abs:
-                    self._conservative_merge_split(grid, state, idx, neighbor_idx)
-                    any_merged = True
-                    idx += 1  # Check next pair
-                else:
-                    break  # No more merging needed
+            idx, neighbor_idx = 0, 1
         else:
-            # Right boundary: work from right to left
-            # Allow redistribution up to half the grid
-            idx = grid.n_cells - 1
-            min_idx = max(1, grid.n_cells // 2)
-            while idx > min_idx:
-                neighbor_idx = idx - 1
-                if grid.dm[neighbor_idx] < 1e-15:
-                    break
+            idx, neighbor_idx = grid.n_cells - 1, grid.n_cells - 2
 
-                # Check mass ratio
-                mass_ratio = grid.dm[idx] / grid.dm[neighbor_idx]
-                needs_merge_mass = mass_ratio < self._merge_low or mass_ratio > self._merge_high
+        if grid.dm[neighbor_idx] > 1e-15:
+            mass_ratio = grid.dm[idx] / grid.dm[neighbor_idx]
+            if mass_ratio > self._merge_high:
+                self._conservative_merge_split(grid, state, idx, neighbor_idx)
+                any_changed = True
 
-                # Check volume ratio (CRITICAL for CFL stability)
-                dx_idx = state.x[idx + 1] - state.x[idx]
-                dx_neighbor = state.x[neighbor_idx + 1] - state.x[neighbor_idx]
-                if dx_neighbor > 1e-15:
-                    vol_ratio = dx_idx / dx_neighbor
-                    needs_merge_vol = vol_ratio < self._merge_low or vol_ratio > self._merge_high
-                else:
-                    needs_merge_vol = True
+        return any_changed
 
-                # Check absolute minimum cell size
-                needs_merge_abs = dx_idx < self._min_cell_size
+    def _absorb_boundary_cell(
+        self,
+        grid: LagrangianGrid,
+        state: FlowState,
+    ) -> None:
+        """
+        Retire the drained boundary cell by conservative absorption.
 
-                if needs_merge_mass or needs_merge_vol or needs_merge_abs:
-                    self._conservative_merge_split(grid, state, idx, neighbor_idx)
-                    any_merged = True
-                    idx -= 1
-                else:
-                    break
+        The boundary cell's remaining mass, momentum, and energy are folded
+        into its neighbor; the interior face between them is removed and the
+        neighbor's outer face becomes the domain boundary (piston) face. The
+        cell count decreases by one. FlowState arrays are reassigned in
+        place (shrunk), so existing references to the state object stay valid.
 
-        return any_merged
+        Conservation:
+        - Mass: exact (dm_neighbor += dm_boundary).
+        - Total energy: exact (internal energy adjusted for the kinetic
+          energy change, as in _conservative_merge_split).
+        - Momentum: approximate. Both surviving faces carry physically
+          prescribed velocities (piston face) or interior dynamics (inner
+          face), so no degree of freedom remains to enforce it; the error is
+          O(m_boundary * |u_c0 - u_c1|) and m_boundary is at most
+          absorb_threshold x m_neighbor at trigger time.
+
+        Reference: cell absorption at piston faces follows GDTk L1D (Jacobs
+        et al., https://gdtk.uqcloud.net); conservative remap math follows
+        Benson (1992), Computer Methods in Applied Mechanics and Engineering.
+        """
+        left = self._side == BoundarySide.LEFT
+        n = grid.n_cells
+
+        if left:
+            i_b, i_n = 0, 1                 # boundary cell, neighbor cell
+            f_out, f_in = 0, 2              # surviving outer/inner faces (old indexing)
+            f_mid = 1                       # face removed
+        else:
+            i_b, i_n = n - 1, n - 2
+            f_out, f_in = n, n - 2
+            f_mid = n - 1
+
+        # --- Gather conserved quantities (old indexing) ---
+        m0 = grid.dm[i_b]
+        m1 = grid.dm[i_n]
+        m_new = m0 + m1
+
+        u_c0 = 0.5 * (state.u[min(f_mid, f_out)] + state.u[max(f_mid, f_out)])
+        u_c1 = 0.5 * (state.u[min(f_mid, f_in)] + state.u[max(f_mid, f_in)])
+
+        IE_total = m0 * state.e[i_b] + m1 * state.e[i_n]
+        KE_total = 0.5 * m0 * u_c0**2 + 0.5 * m1 * u_c1**2
+        E_total = IE_total + KE_total
+
+        # --- Update grid geometry and mass bookkeeping (cell count -1) ---
+        grid.remove_boundary_cell(self._side)
+
+        # --- New merged-cell state ---
+        u_out = state.u[f_out]
+        u_in = state.u[f_in]
+        u_c_new = 0.5 * (u_out + u_in)
+
+        V_new = abs(state.x[f_in] - state.x[f_out])
+        rho_new = m_new / V_new
+
+        IE_new = E_total - 0.5 * m_new * u_c_new**2
+        if IE_new < 0:
+            # Fallback: keep internal energy (sacrifice exact total energy)
+            IE_new = IE_total
+        e_new = IE_new / m_new
+
+        eos = self._eos
+        p_new = eos.pressure(rho_new, e_new)
+        T_new = eos.temperature(rho_new, e_new)
+        c_new = eos.sound_speed(rho_new, p_new)
+        s_new = eos.entropy(rho_new, p_new)
+        gamma_new = eos.get_gamma(rho_new, p_new) if hasattr(eos, 'get_gamma') else eos.gamma
+
+        # --- Shrink state arrays in place (drop boundary cell / mid face) ---
+        for name in ("tau", "rho", "p", "T", "e", "E", "c", "gamma", "s"):
+            setattr(state, name, np.delete(getattr(state, name), i_b))
+        state.x = np.delete(state.x, f_mid)
+        state.u = np.delete(state.u, f_mid)
+
+        # Index of the merged cell after deletion (new boundary cell)
+        merged = 0 if left else len(state.rho) - 1
+
+        state.rho[merged] = rho_new
+        state.tau[merged] = 1.0 / rho_new
+        state.e[merged] = e_new
+        state.E[merged] = e_new + 0.5 * u_c_new**2
+        state.p[merged] = p_new
+        state.T[merged] = T_new
+        state.c[merged] = c_new
+        state.s[merged] = s_new
+        state.gamma[merged] = gamma_new
+
+        # Mass bookkeeping mirrors the grid
+        state.dm = grid.dm.copy()
+        state.m = grid.m.copy()
 
     def _conservative_merge_split(
         self,
