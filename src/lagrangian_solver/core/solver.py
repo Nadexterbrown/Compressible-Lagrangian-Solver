@@ -90,6 +90,8 @@ class SolverConfig:
     hc_quad: float = 0.5
     hc_density_switch: bool = True
     hc_enabled: bool = False
+    # Raise instead of warn when an explicit step_forward(dt) cannot be honored
+    strict_dt: bool = False
 
     # Legacy field for backward compatibility
     artificial_viscosity: Optional[ArtificialViscosityConfig] = None
@@ -351,12 +353,71 @@ class CompatibleLagrangianSolver:
         """
         return compute_total_energy(self._state, self._grid)
 
+    def _porous_dt_constraint(self) -> float:
+        """
+        Maximum dt allowed by porous BC drainage guards (inf if none apply).
+
+        Prevents draining more than a fraction of the boundary cell per step.
+        """
+        dt_limit = float("inf")
+        for bc in (self._bc_left, self._bc_right):
+            if hasattr(bc, 'get_max_dt_constraint'):
+                dt_limit = min(dt_limit, bc.get_max_dt_constraint(self._grid))
+        return dt_limit
+
+    def _bounded_timestep_info(self) -> TimeStepInfo:
+        """
+        CFL time step including ALL solver-internal constraints.
+
+        The returned dt already honors dt_max/dt_min from the config and any
+        porous BC drainage guards, so callers stepping with it are never
+        clamped further (except the final-time trim).
+        """
+        ts_info = self._integrator.compute_timestep(self._state, self._grid)
+        dt = ts_info.dt
+
+        if self._config.dt_max is not None:
+            dt = min(dt, self._config.dt_max)
+        if self._config.dt_min is not None:
+            dt = max(dt, self._config.dt_min)
+
+        dt = min(dt, self._porous_dt_constraint())
+
+        ts_info.dt = dt
+        return ts_info
+
+    def suggest_dt(self) -> float:
+        """
+        Suggest a stable time step for the current state.
+
+        Includes the CFL condition and every solver-internal constraint
+        (dt_max/dt_min, porous BC drainage guards). Driver scripts must use
+        this instead of duplicating the CFL formula: a locally computed dt
+        can disagree with the solver's constraints and desync external
+        bookkeeping (docs/DT_CLAMP_REVERT_PLAN.md).
+
+        Returns:
+            Stable time step [s]
+        """
+        if self._state is None:
+            raise RuntimeError("Initial condition not set")
+
+        # Boundary velocities affect the wave-speed estimate
+        self._bc_left.apply_velocity(self._state, self._grid, self._time)
+        self._bc_right.apply_velocity(self._state, self._grid, self._time)
+
+        return self._bounded_timestep_info().dt
+
     def step_forward(self, dt: Optional[float] = None) -> TimeStepInfo:
         """
         Advance the solution by one time step.
 
         Args:
-            dt: Time step size (computed from CFL if None)
+            dt: Time step size (computed from CFL if None). If an explicit dt
+                violates an internal constraint it is reduced; the reduction
+                is counted in stats.clamped_steps and warned about (or raises
+                if config.strict_dt is True). The dt actually integrated is
+                returned in TimeStepInfo.dt and accumulated into solver.time.
 
         Returns:
             TimeStepInfo with step diagnostics
@@ -370,9 +431,9 @@ class CompatibleLagrangianSolver:
         self._bc_left.apply_velocity(self._state, self._grid, self._time)
         self._bc_right.apply_velocity(self._state, self._grid, self._time)
 
-        # Compute time step if not provided
         if dt is None:
-            ts_info = self._integrator.compute_timestep(self._state, self._grid)
+            # Solver-chosen dt already includes every internal constraint
+            ts_info = self._bounded_timestep_info()
             dt = ts_info.dt
         else:
             ts_info = TimeStepInfo(
@@ -382,39 +443,34 @@ class CompatibleLagrangianSolver:
                 max_wave_speed=0.0,
             )
 
-        # Apply time step limits
-        if self._config.dt_max is not None:
-            dt = min(dt, self._config.dt_max)
+            # Apply time step limits to the caller-supplied dt
+            if self._config.dt_max is not None:
+                dt = min(dt, self._config.dt_max)
+            if self._config.dt_min is not None:
+                dt = max(dt, self._config.dt_min)
+
+            dt = min(dt, self._porous_dt_constraint())
             ts_info.dt = dt
 
-        if self._config.dt_min is not None:
-            dt = max(dt, self._config.dt_min)
-            ts_info.dt = dt
-
-        # Apply porous BC CFL constraint (prevent draining boundary cell too fast)
-        if hasattr(self._bc_left, 'get_max_dt_constraint'):
-            dt_porous_left = self._bc_left.get_max_dt_constraint(self._grid)
-            dt = min(dt, dt_porous_left)
-            ts_info.dt = dt
-
-        if hasattr(self._bc_right, 'get_max_dt_constraint'):
-            dt_porous_right = self._bc_right.get_max_dt_constraint(self._grid)
-            dt = min(dt, dt_porous_right)
-            ts_info.dt = dt
-
-        # A caller-supplied dt must never be altered silently: the caller may be
-        # keeping records against its own clock. Count and warn (rate-limited).
-        if dt_requested is not None and dt != dt_requested:
-            self._stats.clamped_steps += 1
-            if self._stats.clamped_steps == 1 or self._stats.clamped_steps % 1000 == 0:
-                warnings.warn(
-                    f"step_forward integrated dt={dt:.6e} s instead of the requested "
-                    f"dt={dt_requested:.6e} s (clamped step #{self._stats.clamped_steps}, "
-                    f"t={self._time:.6e} s). Timelines must be read from solver.time, "
-                    f"not an external clock.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+            # A caller-supplied dt must never be altered silently: the caller
+            # may be keeping records against its own clock.
+            if dt != dt_requested:
+                if self._config.strict_dt:
+                    raise ValueError(
+                        f"step_forward cannot honor requested dt={dt_requested:.6e} s "
+                        f"(constrained to {dt:.6e} s at t={self._time:.6e} s) and "
+                        f"config.strict_dt is enabled."
+                    )
+                self._stats.clamped_steps += 1
+                if self._stats.clamped_steps == 1 or self._stats.clamped_steps % 1000 == 0:
+                    warnings.warn(
+                        f"step_forward integrated dt={dt:.6e} s instead of the requested "
+                        f"dt={dt_requested:.6e} s (clamped step #{self._stats.clamped_steps}, "
+                        f"t={self._time:.6e} s). Timelines must be read from solver.time, "
+                        f"not an external clock.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
         # Don't exceed final time
         if self._time + dt > self._config.t_end:

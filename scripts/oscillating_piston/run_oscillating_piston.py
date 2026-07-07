@@ -643,11 +643,10 @@ def run_oscillating_piston(config: Dict = None, output_dir: str = None):
     while t < t_end:
         current_state = solver.state
 
-        # Compute timestep
-        c = eos.sound_speed(current_state.rho, current_state.p)
-        u_avg = 0.5 * (current_state.u[:-1] + current_state.u[1:])
-        dt_cell = grid.dx / (c + np.abs(u_avg))
-        dt = cfl * np.min(dt_cell)
+        # Ask the solver for its dt (CFL + all internal constraints) instead
+        # of duplicating the CFL formula here - a locally computed dt can
+        # disagree with the solver's constraints and desync bookkeeping.
+        dt = solver.suggest_dt()
 
         if t + dt > t_end:
             dt = t_end - t

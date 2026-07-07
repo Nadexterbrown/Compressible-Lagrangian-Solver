@@ -778,9 +778,10 @@ def run_reconstruction(
     while t < t_end:
         current_state = solver.state
 
-        c = eos.sound_speed(current_state.rho, current_state.p)
-        dt_cell = grid.dx / (c + np.abs(current_state.u[:-1] + current_state.u[1:]) / 2)
-        dt = cfl * np.min(dt_cell)
+        # Ask the solver for its dt (CFL + all internal constraints) instead
+        # of duplicating the CFL formula here - a locally computed dt can
+        # disagree with the solver's constraints and desync bookkeeping.
+        dt = solver.suggest_dt()
 
         if t + dt > t_end:
             dt = t_end - t
