@@ -556,9 +556,18 @@ def run_reconstruction(
         Gas velocity = ((sigma-1)/sigma) * U_f, where sigma = rho_u/rho_b.
         rho_u from simulation state (cell 0), rho_b from Cantera equilibrate('HP').
     dt_min : float, optional
-        Minimum timestep [s]. If CFL requires smaller dt, this value is used instead.
-        WARNING: May violate CFL and cause numerical instability at high compressions.
+        REMOVED. Passing a value raises ValueError. Flooring dt above the porous
+        drainage guard corrupts the recorded timeline (docs/DT_CLAMP_REVERT_PLAN.md).
     """
+    if dt_min is not None:
+        raise ValueError(
+            "dt_min is no longer supported: flooring the requested timestep above the "
+            "porous drainage guard makes step_forward silently integrate a smaller dt "
+            "than the script clock advances by, corrupting the recorded timeline "
+            "(see docs/DT_CLAMP_REVERT_PLAN.md). Fix the underlying dt collapse instead "
+            "(docs/PISTON_CELL_COLLAPSE_FIX_PLAN.md Phase 2)."
+        )
+
     print("=" * 70)
     print("EXPERIMENT RECONSTRUCTION SIMULATION")
     print("=" * 70)
@@ -638,8 +647,6 @@ def run_reconstruction(
     print(f"  Initial: rho={rho_init:.6f} kg/m³, c={c_init:.1f} m/s")
     print(f"  Initial: T={conditions['T']} K, P={conditions['P']/1e5:.2f} bar")
     print(f"  AV: c_linear={av_linear}, c_quad={av_quad}")
-    if dt_min is not None:
-        print(f"  dt_min: {dt_min*1e9:.1f} ns (WARNING: may violate CFL)")
     if velocity_scale != 1.0:
         print(f"  Velocity scale: {velocity_scale}")
     if velocity_offset != 0.0:
@@ -706,7 +713,7 @@ def run_reconstruction(
     right_bc = OpenBC(side=BoundarySide.RIGHT, eos=eos, p_external=conditions['P'])
 
     # Create solver
-    solver_config = SolverConfig(cfl=cfl, av_linear=av_linear, av_quad=av_quad, av_enabled=True, dt_min=dt_min)
+    solver_config = SolverConfig(cfl=cfl, av_linear=av_linear, av_quad=av_quad, av_enabled=True)
     solver = LagrangianSolver(grid=grid, eos=eos, bc_left=left_bc, bc_right=right_bc, config=solver_config)
     solver.set_initial_condition(state)
 
@@ -762,10 +769,6 @@ def run_reconstruction(
         c = eos.sound_speed(current_state.rho, current_state.p)
         dt_cell = grid.dx / (c + np.abs(current_state.u[:-1] + current_state.u[1:]) / 2)
         dt = cfl * np.min(dt_cell)
-
-        # Enforce minimum timestep
-        if dt_min is not None and dt < dt_min:
-            dt = dt_min
 
         if t + dt > t_end:
             dt = t_end - t
@@ -919,7 +922,8 @@ def main():
     parser.add_argument("--use-density-ratio-bc", action="store_true",
                         help="Use porous BC with gas velocity from density ratio")
     parser.add_argument("--dt-min", type=float, default=None,
-                        help="Minimum timestep [s] (e.g., 1e-9 for 1 ns). WARNING: May violate CFL.")
+                        help="REMOVED (raises an error). Flooring dt corrupted recorded timelines; "
+                             "see docs/DT_CLAMP_REVERT_PLAN.md.")
 
     args = parser.parse_args()
 
