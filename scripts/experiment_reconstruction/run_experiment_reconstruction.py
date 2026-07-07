@@ -19,6 +19,7 @@ Usage:
 
 import sys
 import json
+import time
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -781,6 +782,7 @@ def run_reconstruction(
 
     step = 0
     t = 0.0
+    wall_start = time.time()
 
     while t < t_end:
         current_state = solver.state
@@ -837,7 +839,12 @@ def run_reconstruction(
     # Flush any remaining data
     flush_chunk()
 
-    print(f"\nCompleted: {step} steps, {chunk_count} chunks written")
+    wall_time = time.time() - wall_start
+    stats = solver.statistics
+    print(f"\nCompleted: {step} steps, {chunk_count} chunks written ({wall_time:.1f} s)")
+    if stats.clamped_steps > 0:
+        print(f"  WARNING: {stats.clamped_steps} steps had the requested dt reduced by an "
+              f"internal constraint (timeline is honest via solver.time, but investigate).")
 
     # Consolidate chunks into single saved_data dict
     print(f"\nConsolidating {chunk_count} chunks...")
@@ -884,6 +891,13 @@ def run_reconstruction(
         "T_init": conditions['T'],
         "p_init": conditions['P'],
         "use_density_ratio_bc": use_density_ratio_bc,
+        # Run diagnostics (docs/DT_CLAMP_REVERT_PLAN.md item 7)
+        "mass_leaked": float(getattr(left_bc, 'mass_leaked', 0.0)),
+        "clamped_steps": int(stats.clamped_steps),
+        "min_dt": float(stats.min_dt) if np.isfinite(stats.min_dt) else None,
+        "max_dt": float(stats.max_dt),
+        "solver_final_time": float(solver.time),
+        "wall_time_s": float(wall_time),
     }
 
     # Save outputs
