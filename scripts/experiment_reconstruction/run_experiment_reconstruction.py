@@ -462,22 +462,41 @@ def save_snapshots(saved_data: Dict, config: Dict, output_dir: str, snapshot_int
 
 
 def plot_velocity_comparison(saved_data: Dict, traj_data, output_file: str):
-    """Plot velocity comparison between 1D solver and trajectory data."""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """Validate the ACTUAL piston node motion against the experimental trajectory.
 
-    times_ms = saved_data['t'] * 1e3
+    The previous version plotted saved u_piston = trajectory.velocity(t) against
+    the experimental flame velocity - a tautology that matches by construction
+    no matter what the grid does (it hid the dt-clamp clock desync entirely).
+    This version compares the recorded node position x[:,0] and its numerical
+    derivative against the trajectory, so any divergence between the grid and
+    the prescribed motion is visible.
+    """
+    times = np.asarray(saved_data['t'])
+    x_node = np.asarray(saved_data['x'])[:, 0]
 
-    # Plot piston velocity (grid motion) - should match flame velocity
-    ax.plot(times_ms, saved_data['u_piston'], 'b-', lw=2, label='Piston velocity (1D solver)')
+    fig, (ax_pos, ax_vel) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
 
-    # Plot trajectory flame velocity
-    ax.plot(traj_data.time * 1e3, traj_data.flame_velocity, 'r--', lw=1.5, alpha=0.7, label='Experimental flame velocity')
+    # --- Position: actual node vs experimental trajectory ---
+    ax_pos.plot(times * 1e3, x_node * 1e3, 'b-', lw=2, label='Piston node position (1D solver, x[:,0])')
+    ax_pos.plot(traj_data.time * 1e3, traj_data.flame_position * 1e3, 'r--', lw=1.5, alpha=0.7,
+                label='Experimental flame position')
+    ax_pos.set_ylabel('Position [mm]')
+    ax_pos.set_title('Piston Node vs Experimental Trajectory')
+    ax_pos.legend()
+    ax_pos.grid(True, alpha=0.3)
 
-    ax.set_xlabel('Time [ms]')
-    ax.set_ylabel('Velocity [m/s]')
-    ax.set_title('Velocity Comparison')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # --- Velocity: derivative of actual node motion vs experiment ---
+    if len(times) > 2:
+        u_node = np.gradient(x_node, times)
+        ax_vel.plot(times * 1e3, u_node, 'b-', lw=1.5, label='Piston node velocity (d/dt of x[:,0])')
+    ax_vel.plot(times * 1e3, saved_data['u_piston'], 'g-', lw=1, alpha=0.6,
+                label='Prescribed piston velocity (recorded)')
+    ax_vel.plot(traj_data.time * 1e3, traj_data.flame_velocity, 'r--', lw=1.5, alpha=0.7,
+                label='Experimental flame velocity')
+    ax_vel.set_xlabel('Time [ms]')
+    ax_vel.set_ylabel('Velocity [m/s]')
+    ax_vel.legend()
+    ax_vel.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
