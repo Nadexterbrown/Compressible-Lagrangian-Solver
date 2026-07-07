@@ -870,7 +870,7 @@ def run_reconstruction(
     # Consolidate chunks into single saved_data dict
     print(f"\nConsolidating {chunk_count} chunks...")
     chunk_files = sorted(chunk_dir.glob("chunk_*.npz"))
-    consolidated = {k: [] for k in ['t', 'x', 'rho', 'u', 'p', 'e', 'T', 's', 'u_piston', 'T_b', 'rho_b']}
+    consolidated = {k: [] for k in saved_data.keys()}
     for chunk_file in chunk_files:
         chunk = np.load(chunk_file, allow_pickle=True)
         for k in consolidated:
