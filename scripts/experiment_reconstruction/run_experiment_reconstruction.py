@@ -473,7 +473,12 @@ def plot_velocity_comparison(saved_data: Dict, traj_data, output_file: str):
     the prescribed motion is visible.
     """
     times = np.asarray(saved_data['t'])
-    x_node = np.asarray(saved_data['x'])[:, 0]
+    # Prefer the explicit piston-node series (well-defined under cell
+    # absorption, where x[:,0] becomes NaN padding); fall back for old data.
+    if 'x_piston' in saved_data and len(saved_data['x_piston']) == len(times):
+        x_node = np.asarray(saved_data['x_piston'])
+    else:
+        x_node = np.asarray(saved_data['x'])[:, 0]
 
     fig, (ax_pos, ax_vel) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
 
@@ -745,9 +750,23 @@ def run_reconstruction(
     saved_data = {
         't': [], 'x': [], 'rho': [], 'u': [], 'p': [], 'e': [], 'T': [], 's': [],
         'u_piston': [],  # Piston velocity (grid motion)
+        'x_piston': [],  # Actual piston node position (unambiguous under absorption)
+        'n_active': [],  # Active cell count (decreases when boundary cells retire)
         'T_b': [],       # Burned gas equilibrium temperature (density ratio BC only)
         'rho_b': [],     # Burned gas equilibrium density (density ratio BC only)
     }
+
+    # Boundary-cell absorption retires cells at the piston face, shrinking the
+    # arrays. Left-pad records with NaN to the initial size so stacked npz
+    # arrays stay rectangular and column j keeps meaning "original cell j".
+    n_faces_init = n_cells + 1
+
+    def _pad_left(arr, full):
+        if len(arr) == full:
+            return arr
+        out = np.full(full, np.nan)
+        out[full - len(arr):] = arr
+        return out
 
     # Recording interval - time-based to target ~1000 snapshots
     # Record every dt_record seconds of simulation time
@@ -797,14 +816,16 @@ def run_reconstruction(
         # Record state (time-based)
         if t >= t_next_record:
             saved_data['t'].append(t)
-            saved_data['x'].append(grid.x.copy())
-            saved_data['rho'].append(current_state.rho.copy())
-            saved_data['u'].append(current_state.u.copy())
-            saved_data['p'].append(current_state.p.copy())
-            saved_data['e'].append(current_state.e.copy())
-            saved_data['T'].append(current_state.T.copy())
-            saved_data['s'].append(current_state.s.copy())
+            saved_data['x'].append(_pad_left(grid.x.copy(), n_faces_init))
+            saved_data['rho'].append(_pad_left(current_state.rho.copy(), n_cells))
+            saved_data['u'].append(_pad_left(current_state.u.copy(), n_faces_init))
+            saved_data['p'].append(_pad_left(current_state.p.copy(), n_cells))
+            saved_data['e'].append(_pad_left(current_state.e.copy(), n_cells))
+            saved_data['T'].append(_pad_left(current_state.T.copy(), n_cells))
+            saved_data['s'].append(_pad_left(current_state.s.copy(), n_cells))
             saved_data['u_piston'].append(left_bc.get_piston_velocity(t))
+            saved_data['x_piston'].append(grid.x[0])
+            saved_data['n_active'].append(grid.n_cells)
             # Burned gas equilibrium state (density ratio BC only)
             if use_density_ratio_bc:
                 saved_data['T_b'].append(cached_state['T_b'])
