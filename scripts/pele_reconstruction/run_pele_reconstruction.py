@@ -808,7 +808,10 @@ def run_reconstruction(
             print(f"  ERROR at step {step}, t={t*1e6:.1f} us: {e}")
             break
 
-        t += dt
+        # Single source of truth: the solver's clock advances by the dt it
+        # actually integrated (which may be smaller than requested if a BC
+        # constraint clamped it). Never keep a parallel script clock.
+        t = solver.time
         step += 1
 
         if step % 500 == 0:

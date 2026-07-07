@@ -800,7 +800,10 @@ def run_reconstruction(
             flush_chunk()  # Save what we have before breaking
             break
 
-        t += dt
+        # Single source of truth: the solver's clock advances by the dt it
+        # actually integrated (which may be smaller than requested if a BC
+        # constraint clamped it). Never keep a parallel script clock.
+        t = solver.time
         step += 1
 
         # Periodic flush to disk
