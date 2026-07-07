@@ -138,3 +138,24 @@ class TestTwoClocks:
         dt_request = 2.0 * bc_left.get_max_dt_constraint(grid)
         with pytest.raises(ValueError, match="strict_dt"):
             solver.step_forward(dt_request)
+
+
+class TestPistonNodeFidelity:
+    def test_node_tracks_trajectory_at_solver_time(self):
+        """The piston node must sit at trajectory.position(solver.time).
+
+        This is the invariant the corrupted batch violated: the node was at
+        the trajectory evaluated on the SOLVER clock while records used the
+        script clock. With the honest clock they are the same time base.
+        Heun integration is exact for the linear-velocity trajectory used
+        here, so the tolerance is tight.
+        """
+        solver, bc_left, grid = make_solver()
+        traj = bc_left.trajectory
+
+        for _ in range(200):
+            solver.step_forward(solver.suggest_dt())
+
+        assert solver.time > 0
+        x_expected = traj.position(solver.time)
+        assert grid.x[0] == pytest.approx(x_expected, abs=1e-12)
