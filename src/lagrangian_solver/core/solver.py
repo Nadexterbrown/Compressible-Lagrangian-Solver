@@ -20,6 +20,7 @@ References:
 
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Tuple
+import warnings
 import numpy as np
 import time as timer
 
@@ -118,6 +119,8 @@ class SolverStatistics:
         energy_change: Relative change in total energy
         initial_energy: Initial total energy [J]
         final_energy: Final total energy [J]
+        clamped_steps: Number of steps where a caller-supplied dt was reduced
+            by an internal constraint (the caller's clock must use solver.time)
     """
 
     n_steps: int = 0
@@ -130,6 +133,7 @@ class SolverStatistics:
     energy_change: float = 0.0
     initial_energy: float = 0.0
     final_energy: float = 0.0
+    clamped_steps: int = 0
 
 
 class CompatibleLagrangianSolver:
@@ -360,6 +364,8 @@ class CompatibleLagrangianSolver:
         if self._state is None:
             raise RuntimeError("Initial condition not set")
 
+        dt_requested = dt
+
         # Apply boundary velocities before computing time step
         self._bc_left.apply_velocity(self._state, self._grid, self._time)
         self._bc_right.apply_velocity(self._state, self._grid, self._time)
@@ -395,6 +401,20 @@ class CompatibleLagrangianSolver:
             dt_porous_right = self._bc_right.get_max_dt_constraint(self._grid)
             dt = min(dt, dt_porous_right)
             ts_info.dt = dt
+
+        # A caller-supplied dt must never be altered silently: the caller may be
+        # keeping records against its own clock. Count and warn (rate-limited).
+        if dt_requested is not None and dt != dt_requested:
+            self._stats.clamped_steps += 1
+            if self._stats.clamped_steps == 1 or self._stats.clamped_steps % 1000 == 0:
+                warnings.warn(
+                    f"step_forward integrated dt={dt:.6e} s instead of the requested "
+                    f"dt={dt_requested:.6e} s (clamped step #{self._stats.clamped_steps}, "
+                    f"t={self._time:.6e} s). Timelines must be read from solver.time, "
+                    f"not an external clock.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         # Don't exceed final time
         if self._time + dt > self._config.t_end:
