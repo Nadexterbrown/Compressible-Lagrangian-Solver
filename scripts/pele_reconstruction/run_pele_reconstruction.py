@@ -215,6 +215,17 @@ def plot_xt_diagrams(saved_data: Dict, config: Dict, output_dir: str, use_mass_c
         coord_name = 'physical'
         suffix = '_xt'
 
+    # Retired (absorbed) boundary cells are NaN-padded on the left.
+    # pcolormesh rejects non-finite COORDINATES, so collapse padded entries
+    # onto each row's first active coordinate (zero-width quads at the piston
+    # face). NaN in the plotted DATA is fine (rendered as masked).
+    if not np.all(np.isfinite(coord_2d)):
+        coord_2d = coord_2d.copy()
+        for row in coord_2d:
+            fin = np.isfinite(row)
+            if fin.any():
+                row[~fin] = row[fin][0]
+
     # Time in microseconds
     t_us = times * 1e6
 

@@ -143,10 +143,10 @@ def compare_pair(new_name: str, ref_name: str) -> dict:
     # zero clamped steps in the new run.
     travel = max(abs(dr[-1] - dr[0]) * 1e3, 1e-9)
     checks = {
-        "node_within_0.5pct": rec["metrics"]["node_max_diff_mm"] <= 0.005 * travel + 0.5,
-        "profiles_within_5pct": all(rec["metrics"][f"{k}_median_rel"] <= 0.05
-                                    for k in ("p", "T", "rho")),
-        "zero_clamped_steps": (cfg_n.get("clamped_steps") or 0) == 0,
+        "node_within_0.5pct": bool(rec["metrics"]["node_max_diff_mm"] <= 0.005 * travel + 0.5),
+        "profiles_within_5pct": bool(all(rec["metrics"][f"{k}_median_rel"] <= 0.05
+                                         for k in ("p", "T", "rho"))),
+        "zero_clamped_steps": bool((cfg_n.get("clamped_steps") or 0) == 0),
     }
     rec["checks"] = checks
     rec["ok"] = all(checks.values())
