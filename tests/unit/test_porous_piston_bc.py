@@ -18,7 +18,7 @@ from lagrangian_solver.boundary.piston import TrajectoryInterpolator
 from lagrangian_solver.equations.eos import IdealGasEOS
 from lagrangian_solver.core.state import create_uniform_state
 from lagrangian_solver.core.grid import LagrangianGrid, GridConfig
-from lagrangian_solver.core.solver import LagrangianSolver, SolverConfig
+from lagrangian_solver.core.solver import CompatibleLagrangianSolver as LagrangianSolver, SolverConfig
 
 
 class ConstantTrajectory(TrajectoryInterpolator):
