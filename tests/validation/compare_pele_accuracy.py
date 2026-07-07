@@ -108,12 +108,21 @@ def compare_pair(new_name: str, ref_name: str) -> dict:
         if a != b and not (a is None and b is None):
             rec["caveats"].append(f"config {k}: new={a} vs ref={b}")
 
+    def pct_change(new, ref):
+        """Signed percent change of `new` w.r.t. the reference."""
+        if new is None or ref is None or ref == 0:
+            return None
+        return float(100.0 * (new - ref) / ref)
+
     # Diagnostics
-    rec["metrics"]["n_steps"] = {"new": cfg_n.get("n_steps"), "ref": cfg_r.get("n_steps")}
+    rec["metrics"]["n_steps"] = {"new": cfg_n.get("n_steps"), "ref": cfg_r.get("n_steps"),
+                                 "pct_change": pct_change(cfg_n.get("n_steps"), cfg_r.get("n_steps"))}
     rec["metrics"]["clamped_steps_new"] = cfg_n.get("clamped_steps")
     if "mass_leaked" in cfg_n or "mass_leaked" in cfg_r:
         rec["metrics"]["mass_leaked"] = {"new": cfg_n.get("mass_leaked"),
-                                         "ref": cfg_r.get("mass_leaked")}
+                                         "ref": cfg_r.get("mass_leaked"),
+                                         "pct_change": pct_change(cfg_n.get("mass_leaked"),
+                                                                  cfg_r.get("mass_leaked"))}
 
     # Piston node trajectory over the common time window
     t_n, x_n = node_series(ts_n)
@@ -125,6 +134,7 @@ def compare_pair(new_name: str, ref_name: str) -> dict:
     node_diff = np.abs(dn - dr) * 1e3  # mm
     rec["metrics"]["node_max_diff_mm"] = float(np.max(node_diff))
     rec["metrics"]["node_final_diff_mm"] = float(node_diff[-1])
+    rec["metrics"]["node_final_pct_change"] = pct_change(dn[-1], dr[-1])
     rec["metrics"]["common_t_end_ms"] = float(t_hi * 1e3)
 
     # Final common-time profiles on a shared x grid
@@ -138,6 +148,12 @@ def compare_pair(new_name: str, ref_name: str) -> dict:
         rel = np.abs(vn - vr) / np.maximum(np.abs(vr), 1e-30)
         rec["metrics"][f"{key}_median_rel"] = float(np.median(rel))
         rec["metrics"][f"{key}_p95_rel"] = float(np.percentile(rel, 95))
+        # Signed percent change w.r.t. the reference profile: median of the
+        # pointwise change (bulk shift direction) and change of the profile
+        # mean (integral quantity)
+        signed_pct = 100.0 * (vn - vr) / np.maximum(np.abs(vr), 1e-30)
+        rec["metrics"][f"{key}_median_pct_change"] = float(np.median(signed_pct))
+        rec["metrics"][f"{key}_mean_pct_change"] = pct_change(float(np.mean(vn)), float(np.mean(vr)))
 
     # Pass criteria: node within 0.5% of travel, median profiles within 5%,
     # zero clamped steps in the new run.
@@ -176,15 +192,21 @@ def main():
         if rec["metrics"]:
             m = rec["metrics"]
             if "node_max_diff_mm" in m:
-                print(f"  node diff: max={m['node_max_diff_mm']:.3f} mm, "
-                      f"final={m['node_final_diff_mm']:.3f} mm "
-                      f"(common window ends {m['common_t_end_ms']:.3f} ms)")
+                print(f"  node: final pct change={m['node_final_pct_change']:+.4f}% "
+                      f"(max diff={m['node_max_diff_mm']:.3f} mm; "
+                      f"common window ends {m['common_t_end_ms']:.3f} ms)")
             for k in ("p", "T", "rho"):
-                if f"{k}_median_rel" in m:
-                    print(f"  {k:3s}: median rel={m[f'{k}_median_rel']:.2e}, "
-                          f"p95={m[f'{k}_p95_rel']:.2e}")
+                if f"{k}_median_pct_change" in m:
+                    print(f"  {k:3s}: median pct change={m[f'{k}_median_pct_change']:+.4f}%, "
+                          f"mean pct change={m[f'{k}_mean_pct_change']:+.4f}%  "
+                          f"(|median rel|={m[f'{k}_median_rel']:.2e}, p95={m[f'{k}_p95_rel']:.2e})")
             if "mass_leaked" in m:
-                print(f"  mass_leaked: new={m['mass_leaked']['new']} ref={m['mass_leaked']['ref']}")
+                ml = m["mass_leaked"]
+                pct = f"{ml['pct_change']:+.3f}%" if ml.get("pct_change") is not None else "n/a"
+                print(f"  mass_leaked: pct change={pct} (new={ml['new']} ref={ml['ref']})")
+            if "n_steps" in m and m["n_steps"].get("pct_change") is not None:
+                print(f"  n_steps: pct change={m['n_steps']['pct_change']:+.1f}% "
+                      f"(new={m['n_steps']['new']} ref={m['n_steps']['ref']})")
         if rec["ok"] is not None:
             print(f"  RESULT: {'PASS' if rec['ok'] else 'FAIL'}  {rec.get('checks', '')}")
 
