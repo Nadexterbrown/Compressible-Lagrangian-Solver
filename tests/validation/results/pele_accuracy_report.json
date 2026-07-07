@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-07-06T19:04:08.286247",
+  "pairs": [
+    {
+      "new": "pele_solid",
+      "reference": "solid",
+      "ok": false,
+      "caveats": [
+        "missing new results at Z:\\Research\\Piston-Model-Simulation\\1D-Comperssible-Lagrandian-Solver\\tests\\validation\\results\\pele_solid"
+      ],
+      "metrics": {}
+    },
+    {
+      "new": "pele_fixed_offset",
+      "reference": "pele_porous_cj_extended",
+      "ok": false,
+      "caveats": [
+        "missing new results at Z:\\Research\\Piston-Model-Simulation\\1D-Comperssible-Lagrandian-Solver\\tests\\validation\\results\\pele_fixed_offset"
+      ],
+      "metrics": {}
+    },
+    {
+      "new": "pele_consumption_speed",
+      "reference": "pele_burning_vel_extended",
+      "ok": false,
+      "caveats": [
+        "missing new results at Z:\\Research\\Piston-Model-Simulation\\1D-Comperssible-Lagrandian-Solver\\tests\\validation\\results\\pele_consumption_speed"
+      ],
+      "metrics": {}
+    },
+    {
+      "new": "pele_density_ratio",
+      "reference": "pele_porous_density_ratio",
+      "ok": false,
+      "caveats": [
+        "missing new results at Z:\\Research\\Piston-Model-Simulation\\1D-Comperssible-Lagrandian-Solver\\tests\\validation\\results\\pele_density_ratio"
+      ],
+      "metrics": {}
+    }
+  ]
+}

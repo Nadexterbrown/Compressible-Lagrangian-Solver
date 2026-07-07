@@ -751,7 +751,21 @@ def run_reconstruction(
         't': [], 'x': [], 'rho': [], 'u': [], 'p': [], 'e': [], 'T': [], 's': [],
         'u_piston': [],  # Piston velocity (grid motion)
         'u_gas': [],     # Gas velocity at boundary (same as piston for solid BC)
+        'x_piston': [],  # Actual piston node position (unambiguous under absorption)
+        'n_active': [],  # Active cell count (decreases when boundary cells retire)
     }
+
+    # Boundary-cell absorption retires cells at the piston face, shrinking the
+    # arrays. Left-pad records with NaN to the initial size so stacked npz
+    # arrays stay rectangular and column j keeps meaning "original cell j".
+    n_faces_init = n_cells + 1
+
+    def _pad_left(arr, full):
+        if len(arr) == full:
+            return arr
+        out = np.full(full, np.nan)
+        out[full - len(arr):] = arr
+        return out
 
     # Recording interval
     dx_min = np.min(grid.dx)
@@ -789,13 +803,15 @@ def run_reconstruction(
         # Record state
         if step % record_interval == 0:
             saved_data['t'].append(t)
-            saved_data['x'].append(grid.x.copy())
-            saved_data['rho'].append(current_state.rho.copy())
-            saved_data['u'].append(current_state.u.copy())
-            saved_data['p'].append(current_state.p.copy())
-            saved_data['e'].append(current_state.e.copy())
-            saved_data['T'].append(current_state.T.copy())
-            saved_data['s'].append(current_state.s.copy())
+            saved_data['x'].append(_pad_left(grid.x.copy(), n_faces_init))
+            saved_data['rho'].append(_pad_left(current_state.rho.copy(), n_cells))
+            saved_data['u'].append(_pad_left(current_state.u.copy(), n_faces_init))
+            saved_data['p'].append(_pad_left(current_state.p.copy(), n_cells))
+            saved_data['e'].append(_pad_left(current_state.e.copy(), n_cells))
+            saved_data['T'].append(_pad_left(current_state.T.copy(), n_cells))
+            saved_data['s'].append(_pad_left(current_state.s.copy(), n_cells))
+            saved_data['x_piston'].append(grid.x[0])
+            saved_data['n_active'].append(grid.n_cells)
             if use_porous:
                 saved_data['u_piston'].append(left_bc.get_piston_velocity(t))
                 saved_data['u_gas'].append(left_bc.get_gas_velocity(t))
@@ -852,6 +868,9 @@ def run_reconstruction(
         "c_init": c_init,
         "T_init": INPUT_PARAMS_CONFIG['T'],
         "p_init": INPUT_PARAMS_CONFIG['P'],
+        # Run diagnostics (docs/DT_CLAMP_REVERT_PLAN.md item 7)
+        "clamped_steps": int(solver.statistics.clamped_steps),
+        "n_cells_final": int(grid.n_cells),
     }
 
     # Add porous-specific diagnostics
