@@ -77,6 +77,21 @@ def node_series(ts):
     return np.asarray(ts["t"]), xp
 
 
+def face_series(ts, key):
+    """Time series of the piston-face (first active cell) value of `key`.
+
+    Retired cells are NaN-padded on the left, so the face cell is the first
+    finite entry of each row.
+    """
+    t = np.asarray(ts["t"])
+    rows = np.asarray(ts[key], dtype=float)
+    v = np.empty(len(rows))
+    for i, row in enumerate(rows):
+        fin = np.isfinite(row)
+        v[i] = row[fin][0] if fin.any() else np.nan
+    return t, v
+
+
 def profile_at(ts, key, t_target):
     """Cell-centered profile (x_centers, values) at the snapshot nearest t_target,
     restricted to finite (active) cells."""
@@ -137,6 +152,19 @@ def compare_pair(new_name: str, ref_name: str) -> dict:
     rec["metrics"]["node_final_pct_change"] = pct_change(dn[-1], dr[-1])
     rec["metrics"]["common_t_end_ms"] = float(t_hi * 1e3)
 
+    # State at the piston face (first active cell), compared over the common
+    # time window: signed percent change of the face p/T/rho vs the reference.
+    for key in ("p", "T", "rho"):
+        tf_n, vf_n = face_series(ts_n, key)
+        tf_r, vf_r = face_series(ts_r, key)
+        fn = np.interp(t_common, tf_n, vf_n)
+        fr = np.interp(t_common, tf_r, vf_r)
+        valid = np.isfinite(fn) & np.isfinite(fr) & (np.abs(fr) > 1e-30)
+        pct = 100.0 * (fn[valid] - fr[valid]) / fr[valid]
+        rec["metrics"][f"face_{key}_final_pct_change"] = float(pct[-1]) if pct.size else None
+        rec["metrics"][f"face_{key}_median_pct_change"] = float(np.median(pct)) if pct.size else None
+        rec["metrics"][f"face_{key}_max_abs_pct_change"] = float(np.max(np.abs(pct))) if pct.size else None
+
     # Final common-time profiles on a shared x grid
     for key in ("p", "T", "rho"):
         t_used, xc_n, v_n = profile_at(ts_n, key, t_hi)
@@ -196,8 +224,13 @@ def main():
                       f"(max diff={m['node_max_diff_mm']:.3f} mm; "
                       f"common window ends {m['common_t_end_ms']:.3f} ms)")
             for k in ("p", "T", "rho"):
+                if f"face_{k}_final_pct_change" in m and m[f"face_{k}_final_pct_change"] is not None:
+                    print(f"  face {k:3s}: final pct change={m[f'face_{k}_final_pct_change']:+.4f}%, "
+                          f"median over window={m[f'face_{k}_median_pct_change']:+.4f}%, "
+                          f"max |pct|={m[f'face_{k}_max_abs_pct_change']:.3f}%")
+            for k in ("p", "T", "rho"):
                 if f"{k}_median_pct_change" in m:
-                    print(f"  {k:3s}: median pct change={m[f'{k}_median_pct_change']:+.4f}%, "
+                    print(f"  prof {k:3s}: median pct change={m[f'{k}_median_pct_change']:+.4f}%, "
                           f"mean pct change={m[f'{k}_mean_pct_change']:+.4f}%  "
                           f"(|median rel|={m[f'{k}_median_rel']:.2e}, p95={m[f'{k}_p95_rel']:.2e})")
             if "mass_leaked" in m:
