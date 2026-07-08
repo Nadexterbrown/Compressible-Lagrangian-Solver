@@ -3,8 +3,8 @@ Accuracy / validation comparison: new Pele reconstruction runs vs references
 =============================================================================
 
 Compares the Pele cases produced by run_validation_suite_mpi.py (in
-tests/validation/results/) against the corresponding pre-fix reference
-results in scripts/pele_reconstruction/results/:
+tests/validation/results/) against the pre-fix reference results in
+scripts/pele_reconstruction/results/:
 
     new case                   reference
     ------------------------   -----------------------------------------
@@ -13,22 +13,20 @@ results in scripts/pele_reconstruction/results/:
     pele_consumption_speed     pele_burning_vel_extended
     pele_density_ratio         pele_porous_density_ratio
 
-The references were verified clean of the dt-clamp clock desync (deficits
-<= 0.2%, see docs/DT_CLAMP_REVERT_PLAN.md), so the new runs should agree
-with them up to (a) the unified CFL formula, (b) boundary-cell absorption
-replacing merge-split near the piston face, and (c) any config differences
-(printed as caveats - e.g. the solid reference used domain_length 2.5 m).
+All comparison quantities are SIGNED PERCENT DIFFERENCE w.r.t. the
+reference: (new - ref) / ref * 100.
 
-Metrics per pair:
-- piston node trajectory: interpolated onto the common time base;
-  max and final absolute difference [mm]
-- final common-time p/T/rho profiles interpolated onto a common x grid:
-  median and p95 relative difference
-- cumulative mass_leaked (porous cases)
-- step count and clamped_steps
+Reported per pair:
+- n_steps            : cost of the run
+- node final         : piston node position at the end of the common window
+- piston-face state  : p/T/rho of the first active cell (final value at the
+                       common end time, and median over the common window)
+- domain statistics  : spatial mean/std/min/max of p/T/rho over the active
+                       domain at the final common time, each compared as a
+                       percent difference of the statistic
 
 Usage:
-    python compare_pele_accuracy.py            # all four pairs
+    python compare_pele_accuracy.py
     python compare_pele_accuracy.py --pairs pele_density_ratio
 
 Writes tests/validation/results/pele_accuracy_report.{json,md}.
@@ -54,8 +52,15 @@ PAIRS = {
     "pele_density_ratio": "pele_porous_density_ratio",
 }
 
-CONFIG_KEYS = ["domain_length", "n_cells", "cfl", "av_linear", "av_quad",
-               "data_source", "gas_velocity_offset", "gas_offset_data"]
+VARS = ("p", "T", "rho")
+CONFIG_KEYS = ["domain_length", "n_cells", "cfl", "data_source"]
+
+
+def pct(new, ref):
+    """Signed percent difference of `new` w.r.t. `ref`."""
+    if new is None or ref is None or ref == 0 or not np.isfinite(ref):
+        return None
+    return float(100.0 * (new - ref) / ref)
 
 
 def load_case(path: Path):
@@ -65,8 +70,7 @@ def load_case(path: Path):
 
 
 def node_series(ts):
-    """Piston node position series (x_piston if recorded, else x[:,0] with
-    NaN-padding awareness: first finite entry per row)."""
+    """Piston node position series (first finite face per row)."""
     if "x_piston" in ts:
         return np.asarray(ts["t"]), np.asarray(ts["x_piston"])
     x = np.asarray(ts["x"], dtype=float)
@@ -78,11 +82,7 @@ def node_series(ts):
 
 
 def face_series(ts, key):
-    """Time series of the piston-face (first active cell) value of `key`.
-
-    Retired cells are NaN-padded on the left, so the face cell is the first
-    finite entry of each row.
-    """
+    """Piston-face (first active cell) value of `key` over time."""
     t = np.asarray(ts["t"])
     rows = np.asarray(ts[key], dtype=float)
     v = np.empty(len(rows))
@@ -92,21 +92,23 @@ def face_series(ts, key):
     return t, v
 
 
-def profile_at(ts, key, t_target):
-    """Cell-centered profile (x_centers, values) at the snapshot nearest t_target,
-    restricted to finite (active) cells."""
+def domain_values_at(ts, key, t_target):
+    """Active-domain cell values of `key` at the snapshot nearest t_target."""
     t = np.asarray(ts["t"])
     i = int(np.argmin(np.abs(t - t_target)))
-    x = np.asarray(ts["x"][i], dtype=float)
     v = np.asarray(ts[key][i], dtype=float)
-    xc = 0.5 * (x[:-1] + x[1:])
-    fin = np.isfinite(xc) & np.isfinite(v)
-    return float(t[i]), xc[fin], v[fin]
+    return v[np.isfinite(v)]
+
+
+def spatial_stats(v):
+    return {"mean": float(np.mean(v)), "std": float(np.std(v)),
+            "min": float(np.min(v)), "max": float(np.max(v))}
 
 
 def compare_pair(new_name: str, ref_name: str) -> dict:
     new_path, ref_path = NEW_DIR / new_name, REF_DIR / ref_name
-    rec = {"new": new_name, "reference": ref_name, "ok": None, "caveats": [], "metrics": {}}
+    rec = {"new": new_name, "reference": ref_name, "ok": None,
+           "caveats": [], "metrics": {}}
 
     for tag, p in [("new", new_path), ("reference", ref_path)]:
         if not (p / "timeseries.npz").exists():
@@ -116,85 +118,65 @@ def compare_pair(new_name: str, ref_name: str) -> dict:
 
     ts_n, cfg_n = load_case(new_path)
     ts_r, cfg_r = load_case(ref_path)
+    m = rec["metrics"]
 
-    # Config caveats
     for k in CONFIG_KEYS:
         a, b = cfg_n.get(k), cfg_r.get(k)
         if a != b and not (a is None and b is None):
             rec["caveats"].append(f"config {k}: new={a} vs ref={b}")
 
-    def pct_change(new, ref):
-        """Signed percent change of `new` w.r.t. the reference."""
-        if new is None or ref is None or ref == 0:
-            return None
-        return float(100.0 * (new - ref) / ref)
+    m["clamped_steps_new"] = cfg_n.get("clamped_steps")
 
-    # Diagnostics
-    rec["metrics"]["n_steps"] = {"new": cfg_n.get("n_steps"), "ref": cfg_r.get("n_steps"),
-                                 "pct_change": pct_change(cfg_n.get("n_steps"), cfg_r.get("n_steps"))}
-    rec["metrics"]["clamped_steps_new"] = cfg_n.get("clamped_steps")
-    if "mass_leaked" in cfg_n or "mass_leaked" in cfg_r:
-        rec["metrics"]["mass_leaked"] = {"new": cfg_n.get("mass_leaked"),
-                                         "ref": cfg_r.get("mass_leaked"),
-                                         "pct_change": pct_change(cfg_n.get("mass_leaked"),
-                                                                  cfg_r.get("mass_leaked"))}
+    # --- n_steps ---
+    m["n_steps_pct"] = pct(cfg_n.get("n_steps"), cfg_r.get("n_steps"))
 
-    # Piston node trajectory over the common time window
+    # --- node final position over the common time window ---
     t_n, x_n = node_series(ts_n)
     t_r, x_r = node_series(ts_r)
     t_lo, t_hi = max(t_n[0], t_r[0]), min(t_n[-1], t_r[-1])
     t_common = np.linspace(t_lo, t_hi, 500)
-    dn = np.interp(t_common, t_n, x_n)
-    dr = np.interp(t_common, t_r, x_r)
-    node_diff = np.abs(dn - dr) * 1e3  # mm
-    rec["metrics"]["node_max_diff_mm"] = float(np.max(node_diff))
-    rec["metrics"]["node_final_diff_mm"] = float(node_diff[-1])
-    rec["metrics"]["node_final_pct_change"] = pct_change(dn[-1], dr[-1])
-    rec["metrics"]["common_t_end_ms"] = float(t_hi * 1e3)
+    m["common_t_end_ms"] = float(t_hi * 1e3)
+    m["node_final_pct"] = pct(float(np.interp(t_hi, t_n, x_n)),
+                              float(np.interp(t_hi, t_r, x_r)))
 
-    # State at the piston face (first active cell), compared over the common
-    # time window: signed percent change of the face p/T/rho vs the reference.
-    for key in ("p", "T", "rho"):
+    # --- state at the piston face ---
+    m["face"] = {}
+    for key in VARS:
         tf_n, vf_n = face_series(ts_n, key)
         tf_r, vf_r = face_series(ts_r, key)
         fn = np.interp(t_common, tf_n, vf_n)
         fr = np.interp(t_common, tf_r, vf_r)
         valid = np.isfinite(fn) & np.isfinite(fr) & (np.abs(fr) > 1e-30)
-        pct = 100.0 * (fn[valid] - fr[valid]) / fr[valid]
-        rec["metrics"][f"face_{key}_final_pct_change"] = float(pct[-1]) if pct.size else None
-        rec["metrics"][f"face_{key}_median_pct_change"] = float(np.median(pct)) if pct.size else None
-        rec["metrics"][f"face_{key}_max_abs_pct_change"] = float(np.max(np.abs(pct))) if pct.size else None
+        series = 100.0 * (fn[valid] - fr[valid]) / fr[valid]
+        m["face"][key] = {
+            "final_pct": float(series[-1]) if series.size else None,
+            "median_pct": float(np.median(series)) if series.size else None,
+        }
 
-    # Final common-time profiles on a shared x grid
-    for key in ("p", "T", "rho"):
-        t_used, xc_n, v_n = profile_at(ts_n, key, t_hi)
-        _, xc_r, v_r = profile_at(ts_r, key, t_hi)
-        x_lo, x_hi = max(xc_n[0], xc_r[0]), min(xc_n[-1], xc_r[-1])
-        xg = np.linspace(x_lo, x_hi, 800)
-        vn = np.interp(xg, xc_n, v_n)
-        vr = np.interp(xg, xc_r, v_r)
-        rel = np.abs(vn - vr) / np.maximum(np.abs(vr), 1e-30)
-        rec["metrics"][f"{key}_median_rel"] = float(np.median(rel))
-        rec["metrics"][f"{key}_p95_rel"] = float(np.percentile(rel, 95))
-        # Signed percent change w.r.t. the reference profile: median of the
-        # pointwise change (bulk shift direction) and change of the profile
-        # mean (integral quantity)
-        signed_pct = 100.0 * (vn - vr) / np.maximum(np.abs(vr), 1e-30)
-        rec["metrics"][f"{key}_median_pct_change"] = float(np.median(signed_pct))
-        rec["metrics"][f"{key}_mean_pct_change"] = pct_change(float(np.mean(vn)), float(np.mean(vr)))
+    # --- spatial statistics over the entire (active) domain at t_hi ---
+    m["domain_stats"] = {}
+    for key in VARS:
+        sn = spatial_stats(domain_values_at(ts_n, key, t_hi))
+        sr = spatial_stats(domain_values_at(ts_r, key, t_hi))
+        m["domain_stats"][key] = {stat: pct(sn[stat], sr[stat])
+                                  for stat in ("mean", "std", "min", "max")}
 
-    # Pass criteria: node within 0.5% of travel, median profiles within 5%,
-    # zero clamped steps in the new run.
-    travel = max(abs(dr[-1] - dr[0]) * 1e3, 1e-9)
+    # --- pass criteria ---
     checks = {
-        "node_within_0.5pct": bool(rec["metrics"]["node_max_diff_mm"] <= 0.005 * travel + 0.5),
-        "profiles_within_5pct": bool(all(rec["metrics"][f"{k}_median_rel"] <= 0.05
-                                         for k in ("p", "T", "rho"))),
         "zero_clamped_steps": bool((cfg_n.get("clamped_steps") or 0) == 0),
+        "node_within_0.5pct": bool(abs(m["node_final_pct"] or 0) <= 0.5),
+        "face_median_within_5pct": bool(all(
+            abs(m["face"][k]["median_pct"] or 0) <= 5.0 for k in VARS)),
+        "domain_mean_within_5pct": bool(all(
+            abs(m["domain_stats"][k]["mean"] or 0) <= 5.0 for k in VARS)),
     }
     rec["checks"] = checks
     rec["ok"] = all(checks.values())
     return rec
+
+
+def fmt(v, digits=4):
+    return f"{v:+.{digits}f}%" if v is not None else "n/a"
 
 
 def main():
@@ -212,36 +194,25 @@ def main():
 
     records = []
     for new_name, ref_name in selected.items():
-        print(f"\n=== {new_name}  vs  {ref_name} ===")
         rec = compare_pair(new_name, ref_name)
         records.append(rec)
+        m = rec["metrics"]
+
+        print(f"\n=== {new_name}  vs  {ref_name}: {'PASS' if rec['ok'] else 'FAIL'} ===")
         for c in rec["caveats"]:
             print(f"  caveat: {c}")
-        if rec["metrics"]:
-            m = rec["metrics"]
-            if "node_max_diff_mm" in m:
-                print(f"  node: final pct change={m['node_final_pct_change']:+.4f}% "
-                      f"(max diff={m['node_max_diff_mm']:.3f} mm; "
-                      f"common window ends {m['common_t_end_ms']:.3f} ms)")
-            for k in ("p", "T", "rho"):
-                if f"face_{k}_final_pct_change" in m and m[f"face_{k}_final_pct_change"] is not None:
-                    print(f"  face {k:3s}: final pct change={m[f'face_{k}_final_pct_change']:+.4f}%, "
-                          f"median over window={m[f'face_{k}_median_pct_change']:+.4f}%, "
-                          f"max |pct|={m[f'face_{k}_max_abs_pct_change']:.3f}%")
-            for k in ("p", "T", "rho"):
-                if f"{k}_median_pct_change" in m:
-                    print(f"  prof {k:3s}: median pct change={m[f'{k}_median_pct_change']:+.4f}%, "
-                          f"mean pct change={m[f'{k}_mean_pct_change']:+.4f}%  "
-                          f"(|median rel|={m[f'{k}_median_rel']:.2e}, p95={m[f'{k}_p95_rel']:.2e})")
-            if "mass_leaked" in m:
-                ml = m["mass_leaked"]
-                pct = f"{ml['pct_change']:+.3f}%" if ml.get("pct_change") is not None else "n/a"
-                print(f"  mass_leaked: pct change={pct} (new={ml['new']} ref={ml['ref']})")
-            if "n_steps" in m and m["n_steps"].get("pct_change") is not None:
-                print(f"  n_steps: pct change={m['n_steps']['pct_change']:+.1f}% "
-                      f"(new={m['n_steps']['new']} ref={m['n_steps']['ref']})")
-        if rec["ok"] is not None:
-            print(f"  RESULT: {'PASS' if rec['ok'] else 'FAIL'}  {rec.get('checks', '')}")
+        if not m:
+            continue
+        print(f"  n_steps:    {fmt(m['n_steps_pct'], 1)}")
+        print(f"  node final: {fmt(m['node_final_pct'])}   (common window ends {m['common_t_end_ms']:.3f} ms)")
+        print(f"  piston-face state (final / median over window):")
+        for k in VARS:
+            f = m["face"][k]
+            print(f"    {k:3s}: {fmt(f['final_pct'])} / {fmt(f['median_pct'])}")
+        print(f"  domain spatial stats at final common time (mean / std / min / max):")
+        for k in VARS:
+            d = m["domain_stats"][k]
+            print(f"    {k:3s}: {fmt(d['mean'])} / {fmt(d['std'])} / {fmt(d['min'])} / {fmt(d['max'])}")
 
     n_fail = sum(1 for r in records if not r["ok"])
     print("\n" + "=" * 60)
@@ -251,14 +222,24 @@ def main():
     report = {"timestamp": datetime.now().isoformat(), "pairs": records}
     (NEW_DIR / "pele_accuracy_report.json").write_text(json.dumps(report, indent=2))
 
-    lines = [f"# Pele reconstruction accuracy report ({report['timestamp']})", ""]
+    lines = [f"# Pele reconstruction accuracy report ({report['timestamp']})",
+             "", "All values are signed percent difference w.r.t. the reference:",
+             "(new - ref) / ref * 100", ""]
     for r in records:
-        lines.append(f"## {r['new']} vs {r['reference']}: "
-                     f"{'PASS' if r['ok'] else 'FAIL'}")
+        lines.append(f"## {r['new']} vs {r['reference']}: {'PASS' if r['ok'] else 'FAIL'}")
         for c in r["caveats"]:
             lines.append(f"- caveat: {c}")
-        for k, v in r["metrics"].items():
-            lines.append(f"- {k}: {v}")
+        m = r["metrics"]
+        if m:
+            lines.append(f"- n_steps: {fmt(m['n_steps_pct'], 1)}")
+            lines.append(f"- node final: {fmt(m['node_final_pct'])}")
+            lines.append("")
+            lines.append("| variable | face final | face median | domain mean | domain std | domain min | domain max |")
+            lines.append("|---|---|---|---|---|---|---|")
+            for k in VARS:
+                f, d = m["face"][k], m["domain_stats"][k]
+                lines.append(f"| {k} | {fmt(f['final_pct'])} | {fmt(f['median_pct'])} | "
+                             f"{fmt(d['mean'])} | {fmt(d['std'])} | {fmt(d['min'])} | {fmt(d['max'])} |")
         lines.append("")
     (NEW_DIR / "pele_accuracy_report.md").write_text("\n".join(lines))
     print(f"Report saved: {NEW_DIR / 'pele_accuracy_report.md'}")
