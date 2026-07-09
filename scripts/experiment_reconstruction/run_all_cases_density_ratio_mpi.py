@@ -272,7 +272,6 @@ def build_case_list(fuel_filter=None, phi_filter=None):
             'velocity_scale': COMMON_PARAMS['velocity_scale'],
             'velocity_offset': COMMON_PARAMS['velocity_offset'],
             'velocity_min': COMMON_PARAMS['velocity_min'],
-            'dt_min': COMMON_PARAMS['dt_min'],
         }
         cases.append(case)
 
